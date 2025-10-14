@@ -2,6 +2,8 @@
 
 Open software for loudspeaker driver pairing and QC.
 
+![Prepare Tab](images/Prepare%20tab.png "Prepare Tab")
+
 ## Overview
 
 Matchy is a small desktop tool to:
@@ -9,6 +11,8 @@ Matchy is a small desktop tool to:
 - Preprocess and trim data by frequency range and optional downsampling.
 - Detect outliers and curate sets of drivers.
 - Propose optimal monitor pairings (partitions) based on RMS deviation.
+
+The graphical interface is implemented in [`MatchyApp`](matchy_ui.py) and processing logic lives in [`MatchyLogic`](matchy_logic.py).
 
 ## Features
 
@@ -19,7 +23,6 @@ Matchy is a small desktop tool to:
 - CSV export of partition results.
 
 ## How to run
-
 Ensure you have Python version 3.10+. Use the command below:
 ```sh
 python --version
