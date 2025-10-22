@@ -1,4 +1,6 @@
 import os
+import time
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, StringVar, DoubleVar
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -7,10 +9,10 @@ import numpy as np
 
 try:
     # package import when installed or run as package
-    from .matchy_logic import MatchyLogic, load_rew_txt, downsample_pairs
+    from .matchy_logic import MatchyLogic, load_rew_txt
 except Exception:
     # fallback to local import when running as a script from the repo folder
-    from matchy_logic import MatchyLogic, load_rew_txt, downsample_pairs
+    from matchy_logic import MatchyLogic, load_rew_txt
 
 
 class MatchyApp(tk.Tk):
@@ -30,7 +32,43 @@ class MatchyApp(tk.Tk):
         # --- Caches ---
         self.file_data_cache, self.processed_data_cache, self._outlier_data = {}, {}, None
 
+        # Status message timer
+        self._status_timer_id = None
+
+        # Threading support
+        self._worker_thread = None
+        self._cancel_operation = False
+
         self._build_ui()
+
+        # Setup proper cleanup on window close
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+    def _thread_safe_call(self, func, *args, **kwargs):
+        """Execute a function in the main thread safely."""
+        self.after_idle(lambda: func(*args, **kwargs))
+
+    def _is_operation_cancelled(self):
+        """Check if the current operation should be cancelled."""
+        return self._cancel_operation
+
+    def _cancel_current_operation(self):
+        """Cancel the current running operation."""
+        self._cancel_operation = True
+
+    def _reset_cancel_flag(self):
+        """Reset the cancellation flag for new operations."""
+        self._cancel_operation = False
+
+    def _on_closing(self):
+        """Handle application closing - cleanup threads."""
+        self._cancel_current_operation()
+
+        # Wait briefly for threads to finish
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=1.0)
+
+        self.destroy()
 
     def _build_ui(self):
         nb = ttk.Notebook(self)
@@ -40,9 +78,63 @@ class MatchyApp(tk.Tk):
         nb.add(self.tab_import, text="Import")
         nb.add(self.tab_prepare, text="Prepare")
         nb.add(self.tab_results, text="Results")
+
+        # Status label in the top-right corner of the notebook
+        self.status_var = StringVar()
+        self.status_label = ttk.Label(nb, textvariable=self.status_var,
+                                      foreground='green', font=('TkDefaultFont', 9))
+        self.status_label.place(relx=1.0, rely=0.0, anchor='ne', x=-10, y=5)
+
         self._build_import_tab(self.tab_import)
         self._build_prepare_tab(self.tab_prepare)
         self._build_results_tab(self.tab_results)
+
+    def _set_loading_state(self, button, loading=True, elapsed_time=None):
+        """Set loading state for a button with optional timing info and cancel option."""
+        if loading:
+            button.config(state='disabled', text='Processing...')
+            self.update_idletasks()  # Force UI update
+            # You could add a cancel button here if needed
+        else:
+            time_str = f" ({elapsed_time:.2f}s)" if elapsed_time is not None else ""
+            if 'Next' in button['text'] or 'Processing' in button['text']:
+                button.config(state='normal', text=f'Next{time_str}')
+            elif 'Match' in button['text'] or 'Processing' in button['text']:
+                button.config(state='normal', text=f'Match!{time_str}')
+            else:
+                button.config(state='normal')
+            # Clear timing after 3 seconds
+            if elapsed_time is not None:
+                self.after(3000, lambda: self._clear_button_timing(button))
+
+    def _clear_button_timing(self, button):
+        """Clear timing information from button text."""
+        if 'Next' in button['text']:
+            button.config(text='Next')
+        elif 'Match' in button['text']:
+            button.config(text='Match!')
+
+    def _show_status_message(self, message, duration=5000):
+        """Show a status message at the top right that disappears after duration."""
+        # Cancel any existing timer to prevent early clearing
+        if hasattr(self, '_status_timer_id') and self._status_timer_id:
+            self.after_cancel(self._status_timer_id)
+
+        self.status_var.set(message)
+        # Clear the message after the specified duration (if duration > 0)
+        if duration > 0:
+            self._status_timer_id = self.after(
+                duration, lambda: self.status_var.set(""))
+
+    def _show_loading_message(self, message):
+        """Show a persistent loading message that won't auto-clear."""
+        self._show_status_message(message, duration=0)
+
+    def _clear_status_message(self):
+        """Manually clear the status message."""
+        if hasattr(self, '_status_timer_id') and self._status_timer_id:
+            self.after_cancel(self._status_timer_id)
+        self.status_var.set("")
 
     # ---------------- Import Tab ----------------
     def _build_import_tab(self, parent):
@@ -83,16 +175,81 @@ class MatchyApp(tk.Tk):
         self.down_var = StringVar(value="none")
         ttk.Combobox(hdr, textvariable=self.down_var, values=(
             "none", "1/2", "1/3", "1/4"), state="readonly").pack(fill=tk.X, padx=4, pady=2)
-        ttk.Button(right, text="Next", command=self.import_next_to_prepare).pack(
-            fill=tk.X, pady=2)
+        self.next_button = ttk.Button(
+            right, text="Next", command=self.import_next_to_prepare)
+        self.next_button.pack(fill=tk.X, pady=2)
 
     def select_folder(self):
         p = filedialog.askdirectory()
         if p:
             self.folder.set(p)
-            self._scan_folder()
+            self._scan_folder_threaded()
+
+    def _scan_folder_threaded(self):
+        """Scan folder in a background thread to avoid UI freezing."""
+        if self._worker_thread and self._worker_thread.is_alive():
+            return  # Already scanning
+
+        self._reset_cancel_flag()
+        self._show_loading_message("Scanning folder...")
+
+        def scan_worker():
+            start_time = time.time()  # Start timing inside the worker thread
+            try:
+                folder_path = self.folder.get()
+                files = []
+                file_stats = {}
+                file_data_cache = {}
+
+                txt_files = [fn for fn in sorted(os.listdir(folder_path))
+                             if fn.lower().endswith('.txt')]
+
+                for i, fn in enumerate(txt_files):
+                    if self._is_operation_cancelled():
+                        return
+
+                    # Update progress with persistent message
+                    progress_msg = f"Scanning files... {i+1}/{len(txt_files)}"
+                    self._thread_safe_call(
+                        self._show_loading_message, progress_msg)
+
+                    f, y = load_rew_txt(os.path.join(folder_path, fn))
+                    if f.size:
+                        file_data_cache[fn] = (f, y)
+                        files.append(fn)
+
+                if not self._is_operation_cancelled():
+                    # Calculate elapsed time after work is done
+                    elapsed = time.time() - start_time
+
+                    # Update UI in main thread
+                    def update_ui():
+                        self.files.clear()
+                        self.file_stats.clear()
+                        self.file_data_cache.clear()
+
+                        self.files.extend(files)
+                        self.file_stats.update(file_stats)
+                        self.file_data_cache.update(file_data_cache)
+
+                        self._refresh_file_tree(raw=True)
+                        self._show_status_message(
+                            f"Found {len(files)} files in {elapsed:.2f} seconds")
+
+                    self._thread_safe_call(update_ui)
+
+            except Exception as e:
+                elapsed = time.time() - start_time
+                error_msg = f"Error scanning folder: {str(e)}"
+                self._thread_safe_call(self._show_status_message, error_msg)
+                self._thread_safe_call(
+                    messagebox.showerror, "Scan Error", error_msg)
+
+        self._worker_thread = threading.Thread(target=scan_worker, daemon=True)
+        self._worker_thread.start()
 
     def _scan_folder(self):
+        """Legacy synchronous method - kept for compatibility."""
         self.files.clear()
         self.file_stats.clear()
         self.file_data_cache.clear()
@@ -149,10 +306,102 @@ class MatchyApp(tk.Tk):
         self._on_outlier_change()
 
     def import_next_to_prepare(self):
-        self.apply_import_settings()
-        self.nametowidget(self.winfo_children()[0]).select(1)
-        self.prepare_update_plot()
-        self._on_outlier_change()
+        """Process import settings in a background thread."""
+        if self._worker_thread and self._worker_thread.is_alive():
+            return  # Already processing
+
+        self._reset_cancel_flag()
+        self._set_loading_state(self.next_button, loading=True)
+        self._show_loading_message("Processing data...")
+
+        def process_worker():
+            start_time = time.time()  # Start timing inside the worker thread
+            try:
+                # Validate inputs first
+                try:
+                    fmin, fmax = float(self.fmin_var.get()), float(
+                        self.fmax_var.get())
+                except:
+                    self._thread_safe_call(
+                        messagebox.showerror, "Range", "Invalid frequency")
+                    self._thread_safe_call(
+                        self._set_loading_state, self.next_button, False)
+                    return
+                if fmin >= fmax:
+                    self._thread_safe_call(
+                        messagebox.showerror, "Range", "Min must be less than max")
+                    self._thread_safe_call(
+                        self._set_loading_state, self.next_button, False)
+                    return
+
+                if self._is_operation_cancelled():
+                    return
+
+                # Set up processing parameters
+                self.freq_range = (fmin, fmax)
+                ds_str = self.down_var.get()
+                self.downsample = int(ds_str.split(
+                    '/')[1]) if ds_str != 'none' else None
+
+                # Update progress with persistent message
+                self._thread_safe_call(
+                    self._show_loading_message, "Applying import settings...")
+
+                # Process data in background
+                self.logic.file_data_cache = dict(self.file_data_cache)
+                self.logic.files = list(self.files)
+
+                if self._is_operation_cancelled():
+                    return
+
+                self.logic.apply_import_settings(
+                    self.files, self.file_data_cache, fmin, fmax, self.downsample)
+
+                if self._is_operation_cancelled():
+                    return
+
+                # Calculate elapsed time after work is done
+                elapsed = time.time() - start_time
+
+                # Update UI in main thread
+                def update_ui():
+                    self.processed_data_cache = self.logic.processed_data_cache
+                    self.file_stats = self.logic.file_stats
+                    self.filtered_files = self.logic.filtered_files
+                    self.all_filtered_files = list(self.filtered_files)
+
+                    self._refresh_file_tree(raw=False)
+                    self.prepare_update_plot()
+                    if hasattr(self, 'update_outlier_slider_range'):
+                        self.update_outlier_slider_range()
+                    self._on_outlier_change()
+
+                    # Switch to prepare tab
+                    self.nametowidget(self.winfo_children()[0]).select(1)
+
+                    # Update button state with correct timing
+                    self._set_loading_state(
+                        self.next_button, loading=False, elapsed_time=elapsed)
+                    self._show_status_message(
+                        f"Processing finished in {elapsed:.2f} seconds")
+
+                if not self._is_operation_cancelled():
+                    self._thread_safe_call(update_ui)
+
+            except Exception as e:
+                elapsed = time.time() - start_time
+                error_msg = f"Error processing data: {str(e)}"
+
+                def handle_error():
+                    self._set_loading_state(self.next_button, loading=False)
+                    self._show_status_message("Processing failed")
+                    messagebox.showerror("Processing Error", error_msg)
+
+                self._thread_safe_call(handle_error)
+
+        self._worker_thread = threading.Thread(
+            target=process_worker, daemon=True)
+        self._worker_thread.start()
 
     # ---------------- Prepare Tab ----------------
     def _build_prepare_tab(self, parent):
@@ -197,6 +446,15 @@ class MatchyApp(tk.Tk):
             "<Return>", lambda e: self._on_outlier_change())
         self.update_outlier_slider_range = lambda: (self.outlier_scale.configure(from_=1, to=max(
             1, len(self.all_filtered_files))), self.out_tol.set(max(1, len(self.all_filtered_files))))
+
+        # Algorithm selection: placed to the right of the Outlier Tolerance frame
+        alg_frame = ttk.Frame(bottom)
+        alg_frame.pack(side=tk.LEFT, padx=8)
+        ttk.Label(alg_frame, text="Algorithm:").pack(anchor='w')
+        self.algorithm_var = tk.StringVar(value="default")
+        ttk.Combobox(alg_frame, textvariable=self.algorithm_var, values=(
+            "default", "blossom", "balanced"), state="readonly", width=12).pack(anchor='w', pady=4)
+
         self.metric_mode = tk.StringVar(value="rms")
         radio_frame = ttk.Frame(bottom)
         radio_frame.pack(side=tk.LEFT, padx=10)
@@ -204,8 +462,9 @@ class MatchyApp(tk.Tk):
                         variable=self.metric_mode, value="rms").pack(side=tk.LEFT)
         ttk.Radiobutton(radio_frame, text="N/A",
                         variable=self.metric_mode, value="avg").pack(side=tk.LEFT)
-        ttk.Button(bottom, text="Match!",
-                   command=self._apply_outliers_and_next).pack(side=tk.RIGHT)
+        self.match_button = ttk.Button(bottom, text="Match!",
+                                       command=self._apply_outliers_and_next)
+        self.match_button.pack(side=tk.RIGHT)
         plot_frame = ttk.Frame(top)
         plot_frame.pack(fill=tk.BOTH, expand=True, padx=8)
         self.fig = Figure(figsize=(6, 3))
@@ -242,15 +501,62 @@ class MatchyApp(tk.Tk):
         self.canvas.draw_idle()
 
     def _compute_outlier_data(self):
-        # delegate to logic
-        self.logic.all_filtered_files = list(self.all_filtered_files)
-        self.logic.processed_data_cache = dict(self.processed_data_cache)
-        self.logic._compute_outlier_data()
-        self._outlier_data = self.logic._outlier_data
+        """Compute outlier data in a background thread if it's expensive."""
+        if hasattr(self, "_outlier_data") and self._outlier_data is not None:
+            return  # Already computed
 
-    def _on_outlier_change(self, _ev=None):
+        # For small datasets, compute synchronously
+        if len(self.all_filtered_files) <= 20:
+            self.logic.all_filtered_files = list(self.all_filtered_files)
+            self.logic.processed_data_cache = dict(self.processed_data_cache)
+            self.logic._compute_outlier_data()
+            self._outlier_data = self.logic._outlier_data
+            return
+
+        # For larger datasets, use threading
+        if self._worker_thread and self._worker_thread.is_alive():
+            return  # Already computing
+
+        self._reset_cancel_flag()
+        self._show_loading_message("Computing outlier analysis...")
+
+        def compute_worker():
+            start_time = time.time()  # Start timing inside the worker thread
+            try:
+                self.logic.all_filtered_files = list(self.all_filtered_files)
+                self.logic.processed_data_cache = dict(
+                    self.processed_data_cache)
+
+                if self._is_operation_cancelled():
+                    return
+
+                self.logic._compute_outlier_data()
+
+                if not self._is_operation_cancelled():
+                    # Calculate elapsed time after work is done
+                    elapsed = time.time() - start_time
+
+                    def update_ui():
+                        self._outlier_data = self.logic._outlier_data
+                        self._on_outlier_change_ui_update()
+                        self._show_status_message(
+                            f"Outlier analysis complete in {elapsed:.2f} seconds")
+
+                    self._thread_safe_call(update_ui)
+
+            except Exception as e:
+                elapsed = time.time() - start_time
+                error_msg = f"Error computing outliers: {str(e)}"
+                self._thread_safe_call(self._show_status_message, error_msg)
+
+        self._worker_thread = threading.Thread(
+            target=compute_worker, daemon=True)
+        self._worker_thread.start()
+
+    def _on_outlier_change_ui_update(self):
+        """Update UI components after outlier data changes - main thread only."""
         if not hasattr(self, "_outlier_data") or self._outlier_data is None:
-            self._compute_outlier_data()
+            return
         if not self._outlier_data:
             return
         data = self._outlier_data
@@ -295,17 +601,114 @@ class MatchyApp(tk.Tk):
                      linewidth=0.4, alpha=0.7)
         self.canvas.draw_idle()
 
+    def _on_outlier_change(self, _ev=None):
+        if not hasattr(self, "_outlier_data") or self._outlier_data is None:
+            self._compute_outlier_data()
+            return  # UI will be updated by the worker thread
+
+        # If outlier data is already available, update UI immediately
+        self._on_outlier_change_ui_update()
+
     def _apply_outliers_and_next(self):
-        tol_rank_limit = int(self.out_tol.get())
-        if not self._outlier_data:
-            self.active_files = list(self.all_filtered_files)
-        else:
-            self.active_files = [fn for fn in self.all_filtered_files if self._outlier_data["filename_to_rank_map"].get(
-                fn, float('inf')) <= tol_rank_limit]
-        self._build_and_display_partitions(self.active_files)
-        self.nametowidget(self.winfo_children()[0]).select(2)
+        """Apply outlier filtering and build partitions in a background thread."""
+        if self._worker_thread and self._worker_thread.is_alive():
+            return  # Already processing
+
+        self._reset_cancel_flag()
+        self._set_loading_state(self.match_button, loading=True)
+        self._show_loading_message("Building partitions...")
+
+        def match_worker():
+            start_time = time.time()  # Start timing inside the worker thread
+            try:
+                tol_rank_limit = int(self.out_tol.get())
+
+                # Determine active files
+                if not self._outlier_data:
+                    active_files = list(self.all_filtered_files)
+                else:
+                    active_files = [fn for fn in self.all_filtered_files if self._outlier_data["filename_to_rank_map"].get(
+                        fn, float('inf')) <= tol_rank_limit]
+
+                if self._is_operation_cancelled():
+                    return
+
+                self._thread_safe_call(
+                    self._show_loading_message, f"Computing partitions for {len(active_files)} files...")
+
+                # Compute partitions in background thread (the heavy work)
+                self.active_files = active_files
+
+                # Get algorithm choice
+                algo = getattr(self, 'algorithm_var',
+                               None) and self.algorithm_var.get()
+
+                # Do the heavy computation in the background thread
+                try:
+                    if algo == 'blossom':
+                        strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                            active_files, "blossom")
+                    elif algo == 'balanced':
+                        strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                            active_files, "balanced")
+                    else:
+                        strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                            active_files, "default")
+                except ImportError as ie:
+                    # Handle missing dependencies
+                    def show_import_error():
+                        if 'networkx' in str(ie):
+                            messagebox.showerror(
+                                'Algorithm Error', "networkx is required for this algorithm; install with 'pip install networkx'")
+                        else:
+                            messagebox.showerror(
+                                'Import Error', f"Missing dependency: {str(ie)}")
+                        self._set_loading_state(
+                            self.match_button, loading=False)
+                    self._thread_safe_call(show_import_error)
+                    return
+
+                if self._is_operation_cancelled():
+                    return
+
+                # Calculate elapsed time after work is done
+                elapsed = time.time() - start_time
+
+                # Update UI in main thread with computed results
+                def update_ui():
+                    # Display the computed partitions
+                    self._display_partitions_sync(
+                        strategies, model_rms_map, active_files)
+
+                    # Switch to results tab
+                    self.nametowidget(self.winfo_children()[0]).select(2)
+
+                    # Update button state with correct timing
+                    self._set_loading_state(
+                        self.match_button, loading=False, elapsed_time=elapsed)
+                    self._show_status_message(
+                        f"Matching finished in {elapsed:.2f} seconds")
+
+                if not self._is_operation_cancelled():
+                    self._thread_safe_call(update_ui)
+
+            except Exception as e:
+                elapsed = time.time() - start_time
+                error_msg = f"Error building partitions: {str(e)}"
+
+                def handle_error():
+                    self._set_loading_state(self.match_button, loading=False)
+                    self._show_status_message("Matching failed")
+                    messagebox.showerror("Matching Error", error_msg)
+
+                self._thread_safe_call(handle_error)
+
+        self._worker_thread = threading.Thread(
+            target=match_worker, daemon=True)
+        self._worker_thread.start()
 
     def _goto_tab(self, idx): self.nametowidget(
+        # Back to index 0 since we removed top_frame
         self.winfo_children()[0]).select(idx)
 
     # ---------------- Results Tab ----------------
@@ -343,14 +746,13 @@ class MatchyApp(tk.Tk):
         ttk.Button(right_frame, text="Export CSV", command=self.export_list).pack(
             side=tk.BOTTOM, fill=tk.X, pady=4)
 
-    def _build_and_display_partitions(self, files):
+    def _display_partitions_sync(self, strategies, model_rms_map, files):
+        """Display computed partitions in the UI - main thread only."""
         tree = self.partition_tree
         for i in tree.get_children():
             tree.delete(i)
         self.ax2.clear()
         self.canvas2.draw_idle()
-
-        strategies = self.logic.build_partitions(files)
 
         if not strategies:
             if len(files) < 2:
@@ -367,11 +769,87 @@ class MatchyApp(tk.Tk):
             for pair in strat['partition']:
                 m1_name = os.path.splitext(pair[0])[0]
                 m2_name = os.path.splitext(pair[1])[0]
-                pair_rms = self.logic.calculate_deviation_from_processed(
-                    *pair)["rms"]
+                pair_rms = model_rms_map.get(tuple(sorted(
+                    pair)), 0) if model_rms_map else self.logic.calculate_deviation_from_processed(*pair)["rms"]
                 pair_rms_str = f"{pair_rms:.4f}"
                 tree.insert("", "end", values=(partition_id, avg_rms_str,
                             m1_name, m2_name, pair_rms_str, strat['leftover']))
+
+    def _build_and_display_partitions(self, files):
+        """Build partitions and update the UI. For large datasets, this may use threading internally."""
+        tree = self.partition_tree
+        for i in tree.get_children():
+            tree.delete(i)
+        self.ax2.clear()
+        self.canvas2.draw_idle()
+
+        # For small datasets, compute synchronously
+        if len(files) <= 10:
+            self._build_partitions_sync(files)
+            return
+
+        # For larger datasets, show progress and potentially use threading
+        self._show_loading_message(
+            f"Computing partitions for {len(files)} files...")
+
+        # Use after_idle to prevent UI blocking during computation
+        self.after_idle(lambda: self._build_partitions_sync(files))
+
+    def _build_partitions_sync(self, files):
+        """Synchronously build and display partitions."""
+        tree = self.partition_tree
+
+        # Choose algorithm based on dropdown selection
+        algo = getattr(self, 'algorithm_var',
+                       None) and self.algorithm_var.get()
+
+        try:
+            if algo == 'blossom':
+                try:
+                    strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                        files, "blossom")
+                except ImportError:
+                    messagebox.showerror(
+                        'Blossom', "networkx is required for blossom; install with 'pip install networkx'")
+                    return
+            elif algo == 'balanced':
+                try:
+                    strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                        files, "balanced")
+                except ImportError:
+                    messagebox.showerror(
+                        'Balanced', "networkx is required for balanced; install with 'pip install networkx'")
+                    return
+            else:
+                strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                    files, "default")
+
+            if not strategies:
+                if len(files) < 2:
+                    tree.insert("", "end", values=(
+                        "(Need at least 2 monitors)", "", "", "", "", ""))
+                else:
+                    tree.insert("", "end", values=(
+                        f"({len(files)} is too many for analysis)", "", "", "", "", ""))
+                return
+
+            for i, strat in enumerate(strategies):
+                partition_id = i + 1
+                avg_rms_str = f"{strat['avg_rms']:.4f}"
+                for pair in strat['partition']:
+                    m1_name = os.path.splitext(pair[0])[0]
+                    m2_name = os.path.splitext(pair[1])[0]
+                    pair_rms = model_rms_map.get(tuple(sorted(
+                        pair)), 0) if model_rms_map else self.logic.calculate_deviation_from_processed(*pair)["rms"]
+                    pair_rms_str = f"{pair_rms:.4f}"
+                    tree.insert("", "end", values=(
+                        partition_id, avg_rms_str, m1_name, m2_name, pair_rms_str, strat['leftover']))
+
+        except Exception as e:
+            error_msg = f"Error computing partitions: {str(e)}"
+            messagebox.showerror("Partition Error", error_msg)
+            tree.insert("", "end", values=(
+                "(Error computing partitions)", "", "", "", "", ""))
 
     def _on_partition_select(self, event):
         tree = self.partition_tree
