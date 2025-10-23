@@ -138,7 +138,7 @@ def build_partitions_enumeration(files, processed_data_cache):
     return all_strategies, model_rms_map
 
 
-def compute_outlier_data(processed_data_cache, all_filtered_files):
+def compute_outlier_data(processed_data_cache, all_filtered_files, metric_mode="rms"):
     """Compute outlier metadata used by the UI.
 
     Returns None if not computable, else a dict matching the previous shape.
@@ -162,11 +162,20 @@ def compute_outlier_data(processed_data_cache, all_filtered_files):
     else:
         trimmed_mean_curve = np.mean(spl_matrix, axis=0)
     cumulative_dev = np.sum(spl_matrix - trimmed_mean_curve, axis=1)
-    abs_dev_from_mean = np.abs(cumulative_dev - np.mean(cumulative_dev))
+
+    # Calculate deviation based on metric mode
+    if metric_mode == "rms":
+        # RMS deviation: sqrt(mean(squared_differences))
+        squared_diff = (spl_matrix - trimmed_mean_curve) ** 2
+        rms_dev_per_file = np.sqrt(np.mean(squared_diff, axis=1))
+        dev_from_mean = np.abs(rms_dev_per_file - np.mean(rms_dev_per_file))
+    else:  # metric_mode == "avg"
+        # Average absolute deviation
+        dev_from_mean = np.abs(cumulative_dev - np.mean(cumulative_dev))
     relative_curves = [{"filename": c["filename"], "freqs": c["freqs"], "relative": np.subtract(
         c["spl"], trimmed_mean_curve, out=np.ones_like(c["spl"]), where=trimmed_mean_curve != 0)} for c in all_curves]
     ranking = sorted(zip([c['filename'] for c in all_curves],
-                     abs_dev_from_mean), key=lambda x: x[1])
+                     dev_from_mean), key=lambda x: x[1])
     return {"freqs": first_freq_axis, "all_curves": all_curves, "relative_curves": relative_curves, "trimmed_mean_curve": trimmed_mean_curve,
             "filename_to_rank_map": {fn: i + 1 for i, (fn, _) in enumerate(ranking)}, "filename_to_absdev_map": {fn: abs_dev for fn, abs_dev in ranking}}
 
@@ -235,6 +244,112 @@ def build_partitions_blossom(files, processed_data_cache):
 
     # sort strategies by avg_rms
     strategies.sort(key=lambda x: x['avg_rms'])
+    return strategies, model_rms_map
+
+
+def build_partitions_heuristic(files, processed_data_cache):
+    """Build partitions using the original v0.3 heuristic algorithm.
+
+    Returns (strategies, model_rms_map) where strategies is a list of dicts with keys
+    'avg_rms', 'partition', 'leftover'.
+    """
+    files = list(files)
+    n = len(files)
+    if n < 2:
+        return [], {}
+
+    # compute pairwise RMS for all pairs
+    model_rms_map = compute_pairwise_rms_map(files, processed_data_cache)
+
+    # Build RMS diffs in the format expected by heuristic
+    all_pairs = list(combinations(files, 2))
+    rms_diffs_with_names = [
+        (f"{f1}-{f2}", model_rms_map.get(tuple(sorted((f1, f2))), 999))
+        for f1, f2 in all_pairs
+    ]
+    rms_diffs_with_names.sort(key=lambda x: x[1])
+
+    # Core heuristic algorithm (inlined from partition_with_heuristic)
+    if not rms_diffs_with_names or not files:
+        return [], model_rms_map
+
+    want_unmatched = 0 if n % 2 == 0 else 1
+    pre_split = [(p, d, *p.split('-')) for p, d in rms_diffs_with_names]
+    partitions = []
+
+    for idx, (pair, diff, v1, v2) in enumerate(pre_split):
+        inserted = False
+
+        for part in partitions:
+            m = part['matched']
+            if v1 not in m and v2 not in m:
+                m.update((v1, v2))
+                part['unmatched'].difference_update((v1, v2))
+                part['pairs'].append((pair, diff))
+                part['score_sum'] += diff
+                inserted = True
+
+        if not inserted:
+            prefix = pre_split[:idx]
+            used = set()
+            best_pairs, total_score = [], 0
+
+            for p, d, a, b in prefix:
+                if a in (v1, v2) or b in (v1, v2) or a in used or b in used:
+                    continue
+                used.update((a, b))
+                best_pairs.append((p, d))
+                total_score += d
+                if len(used) >= n - (n % 2):
+                    break
+
+            matched = set(used)
+            unmatched = set(files) - matched
+            new_part = {
+                'pairs': best_pairs[:],
+                'matched': matched,
+                'unmatched': unmatched,
+                'score_sum': total_score
+            }
+
+            if v1 not in matched and v2 not in matched:
+                new_part['pairs'].append((pair, diff))
+                new_part['matched'].update((v1, v2))
+                new_part['unmatched'].difference_update((v1, v2))
+                new_part['score_sum'] += diff
+
+            partitions.append(new_part)
+
+        if sum(len(p['unmatched']) == want_unmatched for p in partitions) >= 3:
+            break
+
+    heuristic_partitions = sorted(
+        partitions,
+        key=lambda x: (len(x['unmatched']) != want_unmatched, x['score_sum'])
+    )[:3]
+
+    # Convert to the standard strategy format
+    strategies = []
+    for part in heuristic_partitions:
+        num_pairs = len(part['pairs'])
+        avg_rms = part['score_sum'] / num_pairs if num_pairs > 0 else 0
+
+        partition_tuples = []
+        for pair_str, _ in part['pairs']:
+            f1, f2 = pair_str.split('-')
+            partition_tuples.append(tuple(sorted((f1, f2))))
+
+        leftover = "None"
+        if part['unmatched']:
+            unmatched_copy = part['unmatched'].copy()
+            leftover = os.path.splitext(unmatched_copy.pop())[0]
+
+        strategies.append({
+            'avg_rms': avg_rms,
+            'partition': tuple(partition_tuples),
+            'leftover': leftover
+        })
+
     return strategies, model_rms_map
 
 
@@ -448,21 +563,37 @@ class MatchyLogic:
         self.all_filtered_files = list(self.filtered_files)
         return self.processed_data_cache, self.file_stats, self.filtered_files
 
-    def _compute_outlier_data(self):
+    def _compute_outlier_data(self, metric_mode="rms"):
         self._outlier_data = compute_outlier_data(
-            self.processed_data_cache, self.all_filtered_files)
+            self.processed_data_cache, self.all_filtered_files, metric_mode)
 
-    def get_outlier_data(self):
+    def get_outlier_data(self, metric_mode="rms"):
         if not hasattr(self, '_outlier_data') or self._outlier_data is None:
-            self._compute_outlier_data()
+            self._compute_outlier_data(metric_mode)
         return self._outlier_data
 
     def calculate_deviation_from_processed(self, f1_fn, f2_fn):
+        """Calculate RMS deviation between two processed files.
+
+        Returns a single float RMS value for compatibility with original v0.3.
+        """
         f1, y1 = self.processed_data_cache.get(
             f1_fn, (np.array([]), np.array([])))
         f2, y2 = self.processed_data_cache.get(
             f2_fn, (np.array([]), np.array([])))
-        return calculate_deviation_from_pairs(f1, y1, f2, y2)
+        if f1.size == 0 or f2.size == 0:
+            return 0
+        if np.array_equal(f1, f2):
+            diff = np.abs(y1 - y2)
+        else:
+            f_min = max(f1.min(), f2.min())
+            f_max = min(f1.max(), f2.max())
+            common_f = np.linspace(f_min, f_max, 2000)
+            if common_f.size == 0:
+                return 0
+            diff = np.abs(np.interp(common_f, f1, y1) -
+                          np.interp(common_f, f2, y2))
+        return float(np.sqrt(np.mean(diff**2)))
 
     def _generate_all_pairings(self, items):
         """Legacy method - now delegates to standalone function."""
@@ -482,7 +613,7 @@ class MatchyLogic:
 
         Args:
             files: List of file names to partition
-            algorithm: "default", "blossom", or "balanced"
+            algorithm: "default", "blossom", "balanced", or "heuristic"
 
         Returns:
             Tuple of (strategies, model_rms_map)
@@ -491,6 +622,8 @@ class MatchyLogic:
             return build_partitions_blossom(files, self.processed_data_cache)
         elif algorithm == "balanced":
             return build_partitions_balanced(files, self.processed_data_cache)
+        elif algorithm == "heuristic":
+            return build_partitions_heuristic(files, self.processed_data_cache)
         else:
             return build_partitions_enumeration(files, self.processed_data_cache)
 

@@ -2,10 +2,11 @@ import os
 import time
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, StringVar, DoubleVar
+from tkinter import ttk, filedialog, messagebox, StringVar, DoubleVar, IntVar
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
+import matplotlib.pyplot as plt
 
 try:
     # package import when installed or run as package
@@ -18,8 +19,8 @@ except Exception:
 class MatchyApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Matchy v0.2.3")
-        self.geometry("1000x600")
+        self.title("Matchy v0.3")
+        self.geometry("1200x800")
 
         # Logic handler
         self.logic = MatchyLogic()
@@ -28,6 +29,9 @@ class MatchyApp(tk.Tk):
         self.folder = StringVar(value="")
         self.files, self.file_stats, self.filtered_files, self.all_filtered_files, self.active_files = [], {}, [], [], []
         self.freq_range, self.downsample = (20.0, 20000.0), None
+        self.selected_partition_var = IntVar(value=1)
+        self.top_partitions_data = []
+        self.file_color_map = {}
 
         # --- Caches ---
         self.file_data_cache, self.processed_data_cache, self._outlier_data = {}, {}, None
@@ -299,6 +303,16 @@ class MatchyApp(tk.Tk):
         self.file_stats = self.logic.file_stats
         self.filtered_files = self.logic.filtered_files
         self.all_filtered_files = list(self.filtered_files)
+
+        # --- Generate a unique, readable color for each file ---
+        num_files = len(self.all_filtered_files)
+        cmap = plt.get_cmap('nipy_spectral')
+        self.file_color_map = {}
+        for i, fn in enumerate(self.all_filtered_files):
+            rgba_color = cmap(i / max(1, num_files))
+            hex_color = f'#{int(rgba_color[0]*255):02x}{int(rgba_color[1]*255):02x}{int(rgba_color[2]*255):02x}'
+            self.file_color_map[fn] = hex_color
+
         self._refresh_file_tree(raw=False)
         self.prepare_update_plot()
         if hasattr(self, 'update_outlier_slider_range'):
@@ -370,6 +384,15 @@ class MatchyApp(tk.Tk):
                     self.filtered_files = self.logic.filtered_files
                     self.all_filtered_files = list(self.filtered_files)
 
+                    # --- Generate a unique, readable color for each file ---
+                    num_files = len(self.all_filtered_files)
+                    cmap = plt.get_cmap('nipy_spectral')
+                    self.file_color_map = {}
+                    for i, fn in enumerate(self.all_filtered_files):
+                        rgba_color = cmap(i / max(1, num_files))
+                        hex_color = f'#{int(rgba_color[0]*255):02x}{int(rgba_color[1]*255):02x}{int(rgba_color[2]*255):02x}'
+                        self.file_color_map[fn] = hex_color
+
                     self._refresh_file_tree(raw=False)
                     self.prepare_update_plot()
                     if hasattr(self, 'update_outlier_slider_range'):
@@ -409,7 +432,7 @@ class MatchyApp(tk.Tk):
         top.pack(fill=tk.BOTH, expand=True)
         left = ttk.Frame(top, width=500)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=8)
-        cols = ("ID", "Filename", "datapoints", "Avg dB", "AbsDev", "Rank")
+        cols = ("Filename", "datapoints", "Avg dB", "AbsDev", "Rank")
         tree_frame = ttk.Frame(left)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         self.prep_tree = ttk.Treeview(
@@ -422,7 +445,7 @@ class MatchyApp(tk.Tk):
         self.prep_tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.prep_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._attach_sort_menu(self.prep_tree, {c: c for c in cols})
+        self._attach_sort_menu(self.prep_tree)
         self.show_relative_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="Show graphs relative to curated mean",
                         variable=self.show_relative_var, command=self._on_outlier_change).pack(anchor='w', pady=4)
@@ -451,17 +474,17 @@ class MatchyApp(tk.Tk):
         alg_frame = ttk.Frame(bottom)
         alg_frame.pack(side=tk.LEFT, padx=8)
         ttk.Label(alg_frame, text="Algorithm:").pack(anchor='w')
-        self.algorithm_var = tk.StringVar(value="default")
+        self.algorithm_var = tk.StringVar(value="heuristic")
         ttk.Combobox(alg_frame, textvariable=self.algorithm_var, values=(
-            "default", "blossom", "balanced"), state="readonly", width=12).pack(anchor='w', pady=4)
+            "heuristic", "blossom", "balanced", "brute-force"), state="readonly", width=12).pack(anchor='w', pady=4)
 
         self.metric_mode = tk.StringVar(value="rms")
         radio_frame = ttk.Frame(bottom)
         radio_frame.pack(side=tk.LEFT, padx=10)
         ttk.Radiobutton(radio_frame, text="RMS",
-                        variable=self.metric_mode, value="rms").pack(side=tk.LEFT)
-        ttk.Radiobutton(radio_frame, text="N/A",
-                        variable=self.metric_mode, value="avg").pack(side=tk.LEFT)
+                        variable=self.metric_mode, value="rms", command=self._on_metric_mode_change).pack(side=tk.LEFT)
+        ttk.Radiobutton(radio_frame, text="Avg",
+                        variable=self.metric_mode, value="avg", command=self._on_metric_mode_change).pack(side=tk.LEFT)
         self.match_button = ttk.Button(bottom, text="Match!",
                                        command=self._apply_outliers_and_next)
         self.match_button.pack(side=tk.RIGHT)
@@ -475,9 +498,9 @@ class MatchyApp(tk.Tk):
     def prepare_update_plot(self):
         for i in self.prep_tree.get_children():
             self.prep_tree.delete(i)
-        for idx, fn in enumerate(self.all_filtered_files, start=1):
+        for fn in self.all_filtered_files:
             st = self.file_stats.get(fn, {})
-            self.prep_tree.insert('', 'end', iid=fn, values=(idx, os.path.splitext(
+            self.prep_tree.insert('', 'end', iid=fn, values=(os.path.splitext(
                 fn)[0], st.get('datapoints', 0), f"{st.get('avg_db', 0.0):.2f}", "", ""))
         self._plot_prep()
 
@@ -509,7 +532,8 @@ class MatchyApp(tk.Tk):
         if len(self.all_filtered_files) <= 20:
             self.logic.all_filtered_files = list(self.all_filtered_files)
             self.logic.processed_data_cache = dict(self.processed_data_cache)
-            self.logic._compute_outlier_data()
+            metric_mode = self.metric_mode.get()
+            self.logic._compute_outlier_data(metric_mode)
             self._outlier_data = self.logic._outlier_data
             return
 
@@ -530,7 +554,8 @@ class MatchyApp(tk.Tk):
                 if self._is_operation_cancelled():
                     return
 
-                self.logic._compute_outlier_data()
+                metric_mode = self.metric_mode.get()
+                self.logic._compute_outlier_data(metric_mode)
 
                 if not self._is_operation_cancelled():
                     # Calculate elapsed time after work is done
@@ -559,6 +584,11 @@ class MatchyApp(tk.Tk):
             return
         if not self._outlier_data:
             return
+
+        # Configure a unique tag for each file to set its text color
+        for fn, color in self.file_color_map.items():
+            self.prep_tree.tag_configure(fn, foreground=color)
+
         data = self._outlier_data
         tol_rank_limit = int(self.out_tol.get())
         for fn in self.all_filtered_files:
@@ -568,13 +598,15 @@ class MatchyApp(tk.Tk):
                 fn), data["filename_to_absdev_map"].get(fn)
             if rank is None:
                 continue
-            self.prep_tree.item(
-                fn, tags=('ok' if rank <= tol_rank_limit else 'out',))
+
+            is_outlier = rank > tol_rank_limit
+            final_tags = ('out',) if is_outlier else (fn,)
+
+            self.prep_tree.item(fn, tags=final_tags)
             self.prep_tree.set(fn, column='AbsDev', value=f"{abs_dev:.3f}")
             self.prep_tree.set(fn, column='Rank', value=str(rank))
-        self.prep_tree.tag_configure(
-            'out', background='#e0e0e0', foreground='gray')
-        self.prep_tree.tag_configure('ok', background='', foreground='')
+
+        self.prep_tree.tag_configure('out', foreground='gray')
         self.ax.clear()
         show_relative = self.show_relative_var.get()
         if show_relative:
@@ -593,8 +625,10 @@ class MatchyApp(tk.Tk):
             rank = data["filename_to_rank_map"].get(
                 curve["filename"], float('inf'))
             is_outlier = rank > tol_rank_limit
+            plot_color = 'gray' if is_outlier else self.file_color_map.get(
+                curve["filename"])
             self.ax.plot(curve["freqs"], curve[y_key], label=os.path.splitext(curve["filename"])[
-                         0], linewidth=1, color='gray' if is_outlier else None, alpha=0.2 if is_outlier else 1.0)
+                         0], linewidth=1, color=plot_color, alpha=0.2 if is_outlier else 1.0)
         self.ax.set_xscale('log')
         self.ax.set_xlabel('Frequency (Hz)')
         self.ax.grid(True, which='both', linestyle='--',
@@ -602,12 +636,14 @@ class MatchyApp(tk.Tk):
         self.canvas.draw_idle()
 
     def _on_outlier_change(self, _ev=None):
-        if not hasattr(self, "_outlier_data") or self._outlier_data is None:
-            self._compute_outlier_data()
-            return  # UI will be updated by the worker thread
+        # Always recompute outlier data to reflect current metric mode
+        self._outlier_data = None  # Clear cached data
+        self._compute_outlier_data()
 
-        # If outlier data is already available, update UI immediately
-        self._on_outlier_change_ui_update()
+    def _on_metric_mode_change(self):
+        """Handle radio button changes to recalculate outlier data with new metric mode."""
+        if hasattr(self, 'all_filtered_files') and self.all_filtered_files:
+            self._on_outlier_change()
 
     def _apply_outliers_and_next(self):
         """Apply outlier filtering and build partitions in a background thread."""
@@ -651,9 +687,16 @@ class MatchyApp(tk.Tk):
                     elif algo == 'balanced':
                         strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
                             active_files, "balanced")
-                    else:
+                    elif algo == 'heuristic':
+                        strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                            active_files, "heuristic")
+                    elif algo == 'brute-force':
                         strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
                             active_files, "default")
+                    else:
+                        # Default fallback to heuristic
+                        strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                            active_files, "heuristic")
                 except ImportError as ie:
                     # Handle missing dependencies
                     def show_import_error():
@@ -676,8 +719,8 @@ class MatchyApp(tk.Tk):
 
                 # Update UI in main thread with computed results
                 def update_ui():
-                    # Display the computed partitions
-                    self._display_partitions_sync(
+                    # Store the computed partitions for radio button switching
+                    self._store_partition_strategies(
                         strategies, model_rms_map, active_files)
 
                     # Switch to results tab
@@ -719,10 +762,33 @@ class MatchyApp(tk.Tk):
         left_frame = ttk.LabelFrame(main_pane, text="Monitor Partitions")
         main_pane.add(left_frame, weight=3)
 
-        cols = ("Partition ID", "Partition Avg RMS",
-                "Monitor 1", "Monitor 2", "Pair RMS", "Leftover")
+        radio_frame = ttk.Frame(left_frame)
+        radio_frame.pack(fill=tk.X, pady=(2, 6), padx=5)
+
+        self.partition_radio1 = ttk.Radiobutton(
+            radio_frame, text="Partition 1", variable=self.selected_partition_var,
+            value=1, command=self._display_selected_partition)
+        self.partition_radio1.pack(side=tk.LEFT, padx=5)
+
+        self.partition_radio2 = ttk.Radiobutton(
+            radio_frame, text="Partition 2", variable=self.selected_partition_var,
+            value=2, command=self._display_selected_partition)
+        self.partition_radio2.pack(side=tk.LEFT, padx=5)
+
+        self.partition_radio3 = ttk.Radiobutton(
+            radio_frame, text="Partition 3", variable=self.selected_partition_var,
+            value=3, command=self._display_selected_partition)
+        self.partition_radio3.pack(side=tk.LEFT, padx=5)
+
+        cols = ("Partition Avg RMS", "Monitor 1",
+                "Monitor 2", "Pair RMS", "Leftover")
+        tree_container = ttk.Frame(left_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
+
         self.partition_tree = ttk.Treeview(
-            left_frame, columns=cols, show='headings')
+            tree_container, columns=cols, show='headings')
+        self.partition_tree["displaycolumns"] = cols
+
         for c in cols:
             w = 120 if c in ("Monitor 1", "Monitor 2") else 100
             self.partition_tree.heading(c, text=c)
@@ -733,7 +799,7 @@ class MatchyApp(tk.Tk):
         self.partition_tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.partition_tree.pack(fill=tk.BOTH, expand=True)
-        self._attach_sort_menu(self.partition_tree, {})
+        self._attach_sort_menu(self.partition_tree)
         self.partition_tree.bind('<<TreeviewSelect>>',
                                  self._on_partition_select)
 
@@ -743,37 +809,140 @@ class MatchyApp(tk.Tk):
         self.ax2 = self.fig2.add_subplot(111)
         self.canvas2 = FigureCanvasTkAgg(self.fig2, master=right_frame)
         self.canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        ttk.Button(right_frame, text="Export CSV", command=self.export_list).pack(
+        ttk.Button(right_frame, text="Export Partition as CSV", command=self.export_list).pack(
             side=tk.BOTTOM, fill=tk.X, pady=4)
 
-    def _display_partitions_sync(self, strategies, model_rms_map, files):
-        """Display computed partitions in the UI - main thread only."""
+    def _store_partition_strategies(self, strategies, model_rms_map, files):
+        """Store partition strategies and setup radio buttons."""
+        self.top_partitions_data.clear()
+
+        if not strategies:
+            if len(files) < 2:
+                self.partition_tree.delete(*self.partition_tree.get_children())
+                self.partition_tree.insert(
+                    "", "end", values=("(Need at least 2 monitors)", "", "", "", ""))
+            else:
+                self.partition_tree.delete(*self.partition_tree.get_children())
+                self.partition_tree.insert(
+                    "", "end", values=("(No complete partition found)", "", "", "", ""))
+            self.ax2.clear()
+            self.canvas2.draw_idle()
+            return
+
+        # Convert strategies to the format expected by radio button logic
+        for strat in strategies[:3]:  # Take only top 3
+            partition_data = {
+                'pairs': [],
+                'score_sum': 0,
+                'unmatched': set()
+            }
+
+            for pair in strat['partition']:
+                pair_rms = model_rms_map.get(tuple(sorted(
+                    pair)), 0) if model_rms_map else self.logic.calculate_deviation_from_processed(*pair)["rms"]
+                partition_data['pairs'].append(
+                    (f"{pair[0]}-{pair[1]}", pair_rms))
+                partition_data['score_sum'] += pair_rms
+
+            # Handle leftover
+            if strat['leftover'] != 'None':
+                # Find the actual filename for the leftover
+                leftover_filename = None
+                for fn in files:
+                    if os.path.splitext(fn)[0] == strat['leftover']:
+                        leftover_filename = fn
+                        break
+                if leftover_filename:
+                    partition_data['unmatched'].add(leftover_filename)
+
+            self.top_partitions_data.append(partition_data)
+
+        # Setup radio buttons
+        num_found = len(self.top_partitions_data)
+        self.partition_radio1.config(
+            state=tk.NORMAL if num_found >= 1 else tk.DISABLED)
+        self.partition_radio2.config(
+            state=tk.NORMAL if num_found >= 2 else tk.DISABLED)
+        self.partition_radio3.config(
+            state=tk.NORMAL if num_found >= 3 else tk.DISABLED)
+
+        self.selected_partition_var.set(1)
+        self._display_selected_partition()
+
+    def _display_selected_partition(self):
+        """Display the currently selected partition strategy."""
         tree = self.partition_tree
         for i in tree.get_children():
             tree.delete(i)
         self.ax2.clear()
         self.canvas2.draw_idle()
 
-        if not strategies:
-            if len(files) < 2:
-                tree.insert("", "end", values=(
-                    "(Need at least 2 monitors)", "", "", "", "", ""))
-            else:
-                tree.insert("", "end", values=(
-                    f"({len(files)} is too many for analysis)", "", "", "", "", ""))
+        partition_idx = self.selected_partition_var.get() - 1
+        if not (0 <= partition_idx < len(self.top_partitions_data)):
+            if not self.active_files or len(self.active_files) < 2:
+                return
+            tree.insert("", "end", values=("(No complete partition found)",
+                                           "", "", "", ""))
             return
 
-        for i, strat in enumerate(strategies):
-            partition_id = i + 1
-            avg_rms_str = f"{strat['avg_rms']:.4f}"
-            for pair in strat['partition']:
-                m1_name = os.path.splitext(pair[0])[0]
-                m2_name = os.path.splitext(pair[1])[0]
-                pair_rms = model_rms_map.get(tuple(sorted(
-                    pair)), 0) if model_rms_map else self.logic.calculate_deviation_from_processed(*pair)["rms"]
-                pair_rms_str = f"{pair_rms:.4f}"
-                tree.insert("", "end", values=(partition_id, avg_rms_str,
-                            m1_name, m2_name, pair_rms_str, strat['leftover']))
+        part = self.top_partitions_data[partition_idx]
+        num_pairs = len(part['pairs'])
+        avg_rms = part['score_sum'] / num_pairs if num_pairs > 0 else 0
+        avg_rms_str = f"{avg_rms:.4f}"
+
+        leftover = "None"
+        if part['unmatched']:
+            unmatched_copy = part['unmatched'].copy()
+            leftover = os.path.splitext(unmatched_copy.pop())[0]
+
+        for pair_info in part['pairs']:
+            pair_str, pair_rms = pair_info
+            f1, f2 = pair_str.split('-')
+            m1_name = os.path.splitext(f1)[0]
+            m2_name = os.path.splitext(f2)[0]
+            pair_rms_str = f"{pair_rms:.4f}"
+
+            tree.insert(
+                "", "end", values=(
+                    avg_rms_str, m1_name, m2_name,
+                    pair_rms_str, leftover
+                ))
+
+        if tree.get_children():
+            self._sort_treeview_column(
+                self.partition_tree, 'Pair RMS', reverse=False)
+
+    def _sort_treeview_column(self, tree, col, reverse=False):
+        """Sort treeview by column."""
+        current_cols = tree['columns']
+        if col not in current_cols:
+            return
+
+        items = [(tree.set(k, col), k) for k in tree.get_children('')]
+        try:
+            items = [(float(v), k) for v, k in items if v]
+        except (ValueError, TypeError):
+            pass
+
+        if len(set(v for v, _ in items)) <= 1:
+            for c in current_cols:
+                tree.heading(c, text=c)
+            arrow = '↓' if reverse else '↑'
+            tree.heading(col, text=f"★ {col} {arrow}")
+            return
+
+        items.sort(reverse=reverse)
+        for i, (_, k) in enumerate(items):
+            tree.move(k, '', i)
+
+        for c in current_cols:
+            tree.heading(c, text=c)
+        arrow = '↓' if reverse else '↑'
+        tree.heading(col, text=f"★ {col} {arrow}")
+
+    def _display_partitions_sync(self, strategies, model_rms_map, files):
+        """Legacy method - now delegates to new multi-strategy approach."""
+        self._store_partition_strategies(strategies, model_rms_map, files)
 
     def _build_and_display_partitions(self, files):
         """Build partitions and update the UI. For large datasets, this may use threading internally."""
@@ -820,9 +989,16 @@ class MatchyApp(tk.Tk):
                     messagebox.showerror(
                         'Balanced', "networkx is required for balanced; install with 'pip install networkx'")
                     return
-            else:
+            elif algo == 'heuristic':
+                strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                    files, "heuristic")
+            elif algo == 'brute-force':
                 strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
                     files, "default")
+            else:
+                # Default fallback to heuristic
+                strategies, model_rms_map = self.logic.build_partitions_with_algorithm(
+                    files, "heuristic")
 
             if not strategies:
                 if len(files) < 2:
@@ -858,14 +1034,21 @@ class MatchyApp(tk.Tk):
             return
 
         vals = tree.item(sel[0], 'values')
-        if len(vals) < 4:
+        if len(vals) < 3:
             return
 
-        m1_name, m2_name = vals[2], vals[3]
-        fns = [fn for fn in self.all_filtered_files if os.path.splitext(fn)[
-            0] in (m1_name, m2_name)]
-        if len(fns) == 2:
-            self.plot_pair(fns[0], fns[1])
+        m1_name, m2_name = vals[1], vals[2]
+        f1_found, f2_found = None, None
+        for fn in self.all_filtered_files:
+            if os.path.splitext(fn)[0] == m1_name:
+                f1_found = fn
+            if os.path.splitext(fn)[0] == m2_name:
+                f2_found = fn
+            if f1_found and f2_found:
+                break
+
+        if f1_found and f2_found:
+            self.plot_pair(f1_found, f2_found)
 
     def plot_pair(self, f1_basename, f2_basename):
         self.ax2.clear()
@@ -873,15 +1056,17 @@ class MatchyApp(tk.Tk):
             f1_basename, (np.array([]), np.array([])))
         f2p, y2p = self.processed_data_cache.get(
             f2_basename, (np.array([]), np.array([])))
+
+        f1_label = os.path.splitext(f1_basename)[0]
+        f2_label = os.path.splitext(f2_basename)[0]
+
         if f1p.size:
-            self.ax2.plot(f1p, y1p, label=os.path.splitext(
-                f1_basename)[0], linewidth=0.8)
+            self.ax2.plot(f1p, y1p, label=f1_label, linewidth=0.8)
         if f2p.size:
-            self.ax2.plot(f2p, y2p, label=os.path.splitext(
-                f2_basename)[0], linewidth=0.8)
+            self.ax2.plot(f2p, y2p, label=f2_label, linewidth=0.8)
+
         self.ax2.set_xscale('log')
-        self.ax2.set_title(
-            f"Pair: {os.path.splitext(f1_basename)[0]} vs {os.path.splitext(f2_basename)[0]}")
+        self.ax2.set_title(f"Pair: {f1_label} vs {f2_label}")
         self.ax2.legend(loc='best')
         self.ax2.grid(True, which='both', linestyle='--',
                       linewidth=0.4, alpha=0.7)
@@ -899,49 +1084,35 @@ class MatchyApp(tk.Tk):
             import csv
             with open(path, 'w', newline='', encoding='utf-8') as fh:
                 writer = csv.writer(fh)
-                writer.writerow(self.partition_tree["columns"])
+                writer.writerow(self.partition_tree["displaycolumns"])
                 for iid in self.partition_tree.get_children(''):
                     writer.writerow(self.partition_tree.item(iid, 'values'))
-            messagebox.showinfo("Export CSV", f"Saved: {path}")
+            messagebox.showinfo("Export Partition as CSV", f"Saved: {path}")
         except Exception as e:
-            messagebox.showerror("Export CSV", f"Failed to save:\n{e}")
+            messagebox.showerror("Export Partition as CSV",
+                                 f"Failed to save:\n{e}")
 
-    def _attach_sort_menu(self, tree, headers_dict):
+    def _attach_sort_menu(self, tree):
         menu = tk.Menu(self, tearoff=0)
-
-        def do_sort(col, reverse=False):
-            current_cols = tree['columns']
-            if col not in current_cols:
-                return
-
-            items = [(tree.set(k, col), k) for k in tree.get_children('')]
-            try:
-                items = [(float(v), k) for v, k in items if v]
-            except (ValueError, TypeError):
-                pass
-            if len(set(v for v, _ in items)) <= 1:
-                return
-
-            items.sort(reverse=reverse)
-            for i, (_, k) in enumerate(items):
-                tree.move(k, '', i)
-
-            for c in current_cols:
-                tree.heading(c, text=c)
-            tree.heading(col, text=f"★ {col} {'↓' if reverse else '↑'}")
 
         def popup(event):
             col_id_str = tree.identify_column(event.x)
             if not col_id_str.startswith("#"):
                 return
             col_idx = int(col_id_str[1:]) - 1
-            if col_idx < 0 or col_idx >= len(tree["columns"]):
+            if not (0 <= col_idx < len(tree["columns"])):
                 return
             colid = tree["columns"][col_idx]
+
             menu.delete(0, "end")
             menu.add_command(
-                label=f"Sort '{colid}' Asc", command=lambda: do_sort(colid, False))
+                label=f"Sort '{colid}' Asc",
+                command=lambda: self._sort_treeview_column(tree, colid, False)
+            )
             menu.add_command(
-                label=f"Sort '{colid}' Desc", command=lambda: do_sort(colid, True))
+                label=f"Sort '{colid}' Desc",
+                command=lambda: self._sort_treeview_column(tree, colid, True)
+            )
             menu.tk_popup(event.x_root, event.y_root)
+
         tree.bind("<Button-3>", popup)
