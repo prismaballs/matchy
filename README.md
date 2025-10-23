@@ -2,13 +2,17 @@
 
 Open software for loudspeaker driver pairing and QC.
 
+![Prepare Tab](images/Prepare%20tab.png "Prepare Tab")
+
 ## Overview
 
-Matchy is a small desktop tool to:
+Matchy is a desktop application that can:
 - Import REW-style frequency response text files.
 - Preprocess and trim data by frequency range and optional downsampling.
 - Detect outliers and curate sets of drivers.
 - Propose optimal monitor pairings (partitions) based on RMS deviation.
+
+The graphical interface is implemented in the class [`MatchyApp`](matchy_ui.py) and processing logic lives in the class [`MatchyLogic`](matchy_logic.py).
 
 ## Features
 
@@ -29,14 +33,26 @@ python --version
 ```sh
 pip install -r requirements.txt
 ```
-2. Run matchy.py
+2. Run Matchy
 ```sh
-python matchy_[check version in file].py
+python main.py
 ```
 
-## To Do
+## TODO
 
-- Implement weighted blossom algorithm, rip out current algorithm
-- Split code into multiple files based on function
-- Change calculation for "deviation from curated mean" in Prepare tab from absolute to rms average
-- Add "sort by pair average SPL" option in Results tab
+- Add "sort by pair average SPL" option in Results 
+- Add Percentile Option in Import tab to pre-select outlier tolerance
+- Create Python executable script for distribution without needing to run Python (basically, make this application portable)
+- Replace executable icon for style points
+- Results tab to also show relative difference to mean FR like in Prepare tab
+- Confidence intervals in Prepare tab
+- Optional ideal FR curve that overrides average curated mean
+
+## Potential TODO (will think about it)
+
+- More file format support (CSV, FRD, exports from other software)
+- Export QC report to PDF
+- Pair driver's FR and Impedance Curve for more consistent driver matching in an electrical domain. (Good luck measuring impedance curve) 
+- Unit test and coverage test for robustness of software
+- GitHub Actions to automate testing. Also for robustness of software
+
