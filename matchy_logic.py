@@ -90,54 +90,6 @@ def generate_all_pairings(items):
             yield [(p1, p2)] + sub_pairing
 
 
-def build_partitions_enumeration(files, processed_data_cache):
-    """Return a tuple (strategies, model_rms_map) where strategies is a list of dicts
-    each containing 'avg_rms', 'partition', and 'leftover'.
-
-    Uses exhaustive enumeration to find all possible partitions.
-    """
-    files = list(files)
-    n = len(files)
-    if n < 2:
-        return [], {}
-    # if n > 12:
-    #     return [], {}
-
-    # compute pair-wise RMS between all combinations
-    model_rms_map = compute_pairwise_rms_map(files, processed_data_cache)
-
-    all_strategies = []
-    is_odd = n % 2 != 0
-
-    groups_to_partition = [tuple(files)]
-    leftover_map = {tuple(files): "None"}
-
-    if is_odd:
-        groups_to_partition = [c for c in combinations(files, n - 1)]
-        full_set = set(files)
-        leftover_map = {g: os.path.splitext(
-            (full_set - set(g)).pop())[0] for g in groups_to_partition}
-
-    for group in groups_to_partition:
-        leftover = leftover_map.get(group, "None")
-        unique_partitions_for_group = set()
-        for partition_tuple in generate_all_pairings(group):
-            canonical_partition = tuple(
-                sorted([tuple(sorted(p)) for p in partition_tuple]))
-            unique_partitions_for_group.add(canonical_partition)
-
-        for partition in unique_partitions_for_group:
-            rms_values = [model_rms_map.get(p, 999) for p in partition]
-            if not rms_values:
-                continue
-            avg_rms = np.mean(rms_values)
-            all_strategies.append(
-                {'avg_rms': avg_rms, 'partition': partition, 'leftover': leftover})
-
-    all_strategies.sort(key=lambda x: x['avg_rms'])
-    return all_strategies, model_rms_map
-
-
 def compute_outlier_data(processed_data_cache, all_filtered_files, metric_mode="rms"):
     """Compute outlier metadata used by the UI.
 
@@ -353,167 +305,6 @@ def build_partitions_heuristic(files, processed_data_cache):
     return strategies, model_rms_map
 
 
-def build_partitions_balanced(files, processed_data_cache, eps_list=None, centers=None):
-    """Try to find pairings where pair RMS values are as even (low-variance) as possible.
-
-    If no balanced perfect matching is found, fall back to Blossom exact matching.
-    """
-    try:
-        import networkx as nx
-    except Exception:
-        raise ImportError(
-            "networkx is required for balanced matching. Install via 'pip install networkx'.")
-
-    files = list(files)
-    n = len(files)
-    if n < 2:
-        return [], {}
-
-    # compute pairwise RMS for all pairs
-    model_rms_map = compute_pairwise_rms_map(files, processed_data_cache)
-
-    if not model_rms_map:
-        return [], {}
-
-    rms_values = np.array(sorted(model_rms_map.values()))
-
-    if centers is None:
-        # Use statistical approach instead of trying every unique value
-        centers = [
-            np.min(rms_values),                    # Minimum (tight tolerance)
-            np.percentile(rms_values, 25),         # 25th percentile
-            np.median(rms_values),                 # Median (balanced)
-            np.mean(rms_values),                   # Mean (average-focused)
-            np.percentile(rms_values, 75),         # 75th percentile
-            np.max(rms_values)                     # Maximum (loose tolerance)
-        ]
-        # Remove duplicates while preserving order
-        centers = list(dict.fromkeys(centers))
-
-    if eps_list is None:
-        rms_range = np.max(rms_values) - np.min(rms_values)
-        eps_list = [
-            0.0,                           # Exact matches only
-            rms_range * 0.05,             # Very tight (5% of range)
-            rms_range * 0.1,              # Tight (10% of range)
-            rms_range * 0.2,              # Moderate (20% of range)
-            rms_range * 0.4,              # Loose (40% of range)
-        ]
-
-    edge_list = list(combinations(files, 2))
-    edge_rms = np.array(
-        [model_rms_map.get(tuple(sorted(edge)), np.inf) for edge in edge_list])
-
-    strategies = []
-
-    def best_matching_on_nodes(node_set):
-        best = None
-        node_set = list(node_set)
-        node_set_set = set(node_set)  # For faster membership testing
-
-        relevant_edges = []
-        relevant_rms = []
-        for i, (a, b) in enumerate(edge_list):
-            if a in node_set_set and b in node_set_set:
-                relevant_edges.append((a, b))
-                relevant_rms.append(edge_rms[i])
-
-        relevant_rms = np.array(relevant_rms)
-
-        min_edges_needed = len(node_set) // 2
-
-        for center in centers:
-            best_for_center = None
-
-            for eps in sorted(eps_list):
-                low, high = center - eps, center + eps
-
-                valid_mask = (relevant_rms >= low) & (relevant_rms <= high)
-                valid_edge_count = np.sum(valid_mask)
-
-                # Early skip if not enough edges for perfect matching
-                if valid_edge_count < min_edges_needed:
-                    continue
-
-                G = nx.Graph()
-                G.add_nodes_from(node_set)
-
-                valid_indices = np.where(valid_mask)[0]
-                for idx in valid_indices:
-                    a, b = relevant_edges[idx]
-                    G.add_edge(a, b, weight=1)
-
-                # Quick check: ensure graph has enough connectivity
-                if G.number_of_edges() < min_edges_needed:
-                    continue
-
-                try:
-                    mate = nx.algorithms.matching.max_weight_matching(
-                        G, maxcardinality=True)
-                    if len(mate) * 2 != len(node_set):
-                        continue
-
-                    partition = [tuple(sorted(p)) for p in mate]
-                    rms_vals = np.array([model_rms_map.get(p, 999)
-                                        for p in partition])
-
-                    mean = float(np.mean(rms_vals))
-                    var = float(np.var(rms_vals))
-
-                    candidate = {'avg_rms': mean, 'var': var,
-                                 'partition': tuple(partition)}
-
-                    # Update best for this center
-                    if (best_for_center is None or
-                        candidate['var'] < best_for_center['var'] - 1e-12 or
-                        (abs(candidate['var'] - best_for_center['var']) < 1e-12 and
-                         candidate['avg_rms'] < best_for_center['avg_rms'])):
-                        best_for_center = candidate
-
-                    if var < 0.01:  # Very low variance found
-                        break
-
-                except Exception:
-                    continue
-
-            # Update global best
-            if best_for_center and (best is None or
-                                    best_for_center['var'] < best['var'] - 1e-12 or
-                                    (abs(best_for_center['var'] - best['var']) < 1e-12 and
-                                        best_for_center['avg_rms'] < best['avg_rms'])):
-                best = best_for_center
-
-        return best
-
-    if n % 2 == 0:
-        best = best_matching_on_nodes(files)
-        if best:
-            best['leftover'] = 'None'
-            strategies.append(best)
-    else:
-        for leftover in files:
-            remaining = [f for f in files if f != leftover]
-            best = best_matching_on_nodes(remaining)
-            if best:
-                best2 = best.copy()
-                best2['leftover'] = os.path.splitext(leftover)[0]
-                strategies.append(best2)
-
-    # if no balanced strategies found, fall back to blossom
-    if not strategies:
-        try:
-            strategies, _ = build_partitions_blossom(
-                files, processed_data_cache)
-        except Exception:
-            # final fallback to enumeration
-            strategies, _ = build_partitions_enumeration(
-                files, processed_data_cache)
-
-    # sort by variance then avg_rms if we have variance info
-    strategies.sort(key=lambda x: (x.get('var', 0), x['avg_rms']))
-    return strategies, model_rms_map
-
-
 class MatchyLogic:
     """Encapsulates non-UI processing and calculations used by the app."""
 
@@ -599,33 +390,20 @@ class MatchyLogic:
         """Legacy method - now delegates to standalone function."""
         return generate_all_pairings(items)
 
-    def build_partitions(self, files):
-        """Return a list of partition strategies sorted by avg_rms.
-
-        Each strategy is a dict: {'avg_rms', 'partition', 'leftover'}
-        """
-        strategies, _ = build_partitions_enumeration(
-            files, self.processed_data_cache)
-        return strategies
-
     def build_partitions_with_algorithm(self, files, algorithm="default"):
         """Build partitions using specified algorithm.
 
         Args:
             files: List of file names to partition
-            algorithm: "default", "blossom", "balanced", or "heuristic"
+            algorithm: "heuristic" or "blossom" 
 
         Returns:
             Tuple of (strategies, model_rms_map)
         """
         if algorithm == "blossom":
             return build_partitions_blossom(files, self.processed_data_cache)
-        elif algorithm == "balanced":
-            return build_partitions_balanced(files, self.processed_data_cache)
         elif algorithm == "heuristic":
             return build_partitions_heuristic(files, self.processed_data_cache)
-        else:
-            return build_partitions_enumeration(files, self.processed_data_cache)
 
     def get_pairwise_rms_map(self, files):
         """Get the pairwise RMS map for a set of files.

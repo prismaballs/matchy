@@ -47,6 +47,8 @@ python main.py
 - Results tab to also show relative difference to mean FR like in Prepare tab
 - Confidence intervals in Prepare tab
 - Optional ideal FR curve that overrides average curated mean
+- Investigate tolerance behavior
+- Prepare tab showing statistics of batch (max deviation and avg. standard deviation)
 
 ## Potential TODO (will think about it)
 

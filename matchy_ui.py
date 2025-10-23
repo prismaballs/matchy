@@ -476,7 +476,7 @@ class MatchyApp(tk.Tk):
         ttk.Label(alg_frame, text="Algorithm:").pack(anchor='w')
         self.algorithm_var = tk.StringVar(value="heuristic")
         ttk.Combobox(alg_frame, textvariable=self.algorithm_var, values=(
-            "heuristic", "blossom", "balanced", "brute-force"), state="readonly", width=12).pack(anchor='w', pady=4)
+            "heuristic", "blossom"), state="readonly", width=12).pack(anchor='w', pady=4)
 
         self.metric_mode = tk.StringVar(value="rms")
         radio_frame = ttk.Frame(bottom)
