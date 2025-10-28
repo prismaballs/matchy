@@ -404,6 +404,8 @@ class MatchyLogic:
             return build_partitions_blossom(files, self.processed_data_cache)
         elif algorithm == "heuristic":
             return build_partitions_heuristic(files, self.processed_data_cache)
+        else:
+            return build_partitions_heuristic(files, self.processed_data_cache)
 
     def get_pairwise_rms_map(self, files):
         """Get the pairwise RMS map for a set of files.
