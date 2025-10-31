@@ -7,6 +7,7 @@ Open software for loudspeaker driver pairing and QC.
 ## Overview
 
 Matchy is a desktop application that can:
+
 - Import REW-style frequency response text files.
 - Preprocess and trim data by frequency range and optional downsampling.
 - Detect outliers and curate sets of drivers.
@@ -25,15 +26,19 @@ The graphical interface is implemented in the class [`MatchyApp`](matchy_ui.py) 
 ## How to run
 
 Ensure you have Python version 3.10+. Use the command below:
+
 ```sh
 python --version
 ```
 
 1. Install packages using the requirements.txt
+
 ```sh
 pip install -r requirements.txt
 ```
+
 2. Run Matchy
+
 ```sh
 python main.py
 ```
@@ -47,7 +52,6 @@ python main.py
 - Results tab to also show relative difference to mean FR like in Prepare tab
 - Confidence intervals in Prepare tab
 - Optional ideal FR curve that overrides average curated mean
-- Investigate tolerance behavior
 - Prepare tab showing statistics of batch (max deviation and avg. standard deviation)
 
 ## Potential TODO (will think about it)
@@ -57,4 +61,3 @@ python main.py
 - Pair driver's FR and Impedance Curve for more consistent driver matching in an electrical domain. (Good luck measuring impedance curve) 
 - Unit test and coverage test for robustness of software
 - GitHub Actions to automate testing. Also for robustness of software
-

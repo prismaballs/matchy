@@ -90,8 +90,13 @@ def generate_all_pairings(items):
             yield [(p1, p2)] + sub_pairing
 
 
-def compute_outlier_data(processed_data_cache, all_filtered_files, metric_mode="rms"):
+def compute_outlier_data(processed_data_cache, all_filtered_files, metric_mode="rms", reference_method="mean"):
     """Compute outlier metadata used by the UI.
+
+    Args:
+        reference_method: "mean" or "median"
+            - "mean": Use 25% trimmed mean (excludes top/bottom 25%)
+            - "median": Use median value at each frequency
 
     Returns None if not computable, else a dict matching the previous shape.
     """
@@ -107,12 +112,18 @@ def compute_outlier_data(processed_data_cache, all_filtered_files, metric_mode="
         return None
     spl_matrix = np.array([c['spl'] for c in all_curves])
     n_files = len(all_curves)
-    trim_count = n_files // 4
-    if trim_count > 0 and n_files > 2 * trim_count:
-        trimmed_mean_curve = np.mean(np.sort(spl_matrix, axis=0)[
-                                     trim_count:-trim_count, :], axis=0)
-    else:
-        trimmed_mean_curve = np.mean(spl_matrix, axis=0)
+
+    # Calculate reference curve based on method
+    if reference_method == "median":
+        trimmed_mean_curve = np.median(spl_matrix, axis=0)
+    else:  # "mean"
+        trim_count = n_files // 4
+        if trim_count > 0 and n_files > 2 * trim_count:
+            trimmed_mean_curve = np.mean(np.sort(spl_matrix, axis=0)[
+                                         trim_count:-trim_count, :], axis=0)
+        else:
+            trimmed_mean_curve = np.mean(spl_matrix, axis=0)
+
     cumulative_dev = np.sum(spl_matrix - trimmed_mean_curve, axis=1)
 
     # Calculate deviation based on metric mode
@@ -120,10 +131,12 @@ def compute_outlier_data(processed_data_cache, all_filtered_files, metric_mode="
         # RMS deviation: sqrt(mean(squared_differences))
         squared_diff = (spl_matrix - trimmed_mean_curve) ** 2
         rms_dev_per_file = np.sqrt(np.mean(squared_diff, axis=1))
-        dev_from_mean = np.abs(rms_dev_per_file - np.mean(rms_dev_per_file))
+        dev_from_mean = rms_dev_per_file  # Rank directly by RMS deviation
     else:  # metric_mode == "avg"
-        # Average absolute deviation
-        dev_from_mean = np.abs(cumulative_dev - np.mean(cumulative_dev))
+        # Average absolute deviation: mean of absolute differences
+        abs_diff = np.abs(spl_matrix - trimmed_mean_curve)
+        # Rank directly by mean absolute deviation
+        dev_from_mean = np.mean(abs_diff, axis=1)
     relative_curves = [{"filename": c["filename"], "freqs": c["freqs"], "relative": np.subtract(
         c["spl"], trimmed_mean_curve, out=np.ones_like(c["spl"]), where=trimmed_mean_curve != 0)} for c in all_curves]
     ranking = sorted(zip([c['filename'] for c in all_curves],
@@ -354,13 +367,13 @@ class MatchyLogic:
         self.all_filtered_files = list(self.filtered_files)
         return self.processed_data_cache, self.file_stats, self.filtered_files
 
-    def _compute_outlier_data(self, metric_mode="rms"):
+    def _compute_outlier_data(self, metric_mode="rms", reference_method="mean"):
         self._outlier_data = compute_outlier_data(
-            self.processed_data_cache, self.all_filtered_files, metric_mode)
+            self.processed_data_cache, self.all_filtered_files, metric_mode, reference_method)
 
-    def get_outlier_data(self, metric_mode="rms"):
+    def get_outlier_data(self, metric_mode="rms", reference_method="mean"):
         if not hasattr(self, '_outlier_data') or self._outlier_data is None:
-            self._compute_outlier_data(metric_mode)
+            self._compute_outlier_data(metric_mode, reference_method)
         return self._outlier_data
 
     def calculate_deviation_from_processed(self, f1_fn, f2_fn):
