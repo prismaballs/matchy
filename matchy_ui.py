@@ -466,7 +466,7 @@ class MatchyApp(tk.Tk):
         ttk.Checkbutton(left, text="Show graphs relative to curated mean",
                         variable=self.show_relative_var, command=self._on_outlier_change).pack(anchor='w', pady=4)
         self.center_plot_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="Center plot around mean",
+        ttk.Checkbutton(left, text="Normalize to center",
                         variable=self.center_plot_var, command=self._on_outlier_change).pack(anchor='w', pady=4)
         bottom = ttk.Frame(parent)
         bottom.pack(fill=tk.X, padx=8, pady=8)
@@ -660,7 +660,8 @@ class MatchyApp(tk.Tk):
 
                     # Plot the shifted curves
                     self.ax.set_ylabel('dB (Relative to Reference)')
-                    self.ax.set_title('Relative Frequency Response (Centered)')
+                    self.ax.set_title(
+                        'Relative Frequency Response (Normalized)')
                     for curve in shifted_curves:
                         rank = data["filename_to_rank_map"].get(
                             curve["filename"], float('inf'))
@@ -705,7 +706,7 @@ class MatchyApp(tk.Tk):
 
                     # Plot the shifted curves
                     self.ax.set_ylabel('dB (SPL)')
-                    self.ax.set_title('Frequency Response (Centered)')
+                    self.ax.set_title('Frequency Response (Normalized)')
                     for curve in shifted_curves:
                         rank = data["filename_to_rank_map"].get(
                             curve["filename"], float('inf'))
