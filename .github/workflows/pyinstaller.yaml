@@ -41,6 +41,7 @@ jobs:
           pyinstaller --noconfirm --clean ^
           --windowed ^
           --name matchy ^
+          --icon Matchy32.png ^
           main.py
 
       - name: Upload artifact
