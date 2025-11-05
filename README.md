@@ -45,19 +45,36 @@ python main.py
 
 ## TODO
 
-- Add "sort by pair average SPL" option in Results 
-- Add Percentile Option in Import tab to pre-select outlier tolerance
+- Remove logic of and references to the brute force and balanced algorithms (as they are currently unused)
 - Create Python executable script for distribution without needing to run Python (basically, make this application portable)
-- Replace executable icon for style points
-- Results tab to also show relative difference to mean FR like in Prepare tab
-- Confidence intervals in Prepare tab
-- Optional ideal FR curve that overrides average curated mean
-- Prepare tab showing statistics of batch (max deviation and avg. standard deviation)
+
+#### IMPORT
+
+- Move mean or median target selection to the Prepare tab
+
+#### PREPARE
+
+- Optional ideal FR curve that overrides mean/median target
+- Show statistics of batch sans outliers (max deviation and avg. standard deviation)
+- Add computational time multiplier warning when number of inputs to be matched via blossom is odd
+
+#### RESULTS
+
+- Add "sort by pair average SPL" option
+- Make vertical scaling of plots fixed, matching that of the non normalized Prepare tab
+- Overlay plot of absolute dB deviation between pairs
+- Remove "partition average RMS" and "leftover" columns from table, moving the values to be displayed elsewhere.
 
 ## Potential TODO (will think about it)
 
+- Remove average deviation option (alongside related backpropagation code), leaving only RMS deviation. RMS makes the most sense for this application.
+- Make blossom the only algorithm? (as it provides the best overall combination of speed and accuracy)
 - More file format support (CSV, FRD, exports from other software)
+- Results tab to also show relative difference to mean FR like in Prepare tab
+- Confidence intervals in Prepare tab
 - Export QC report to PDF
-- Pair driver's FR and Impedance Curve for more consistent driver matching in an electrical domain. (Good luck measuring impedance curve) 
+- Pair driver's FR and Impedance Curve for more consistent driver matching in an electrical domain.
 - Unit test and coverage test for robustness of software
 - GitHub Actions to automate testing. Also for robustness of software
+
+![Matchy](images/MatchyHD.png "Matchy Icon")

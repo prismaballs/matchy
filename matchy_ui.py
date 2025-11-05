@@ -7,6 +7,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
 import matplotlib.pyplot as plt
+import ctypes
 
 try:
     # package import when installed or run as package
@@ -15,13 +16,17 @@ except Exception:
     # fallback to local import when running as a script from the repo folder
     from matchy_logic import MatchyLogic, load_rew_txt
 
+myappid = 'mycompany.myproduct.subproduct.version' # arbitrary string
+ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
 class MatchyApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Matchy v0.3")
+        self.title("Matchy v0.3.1")
         self.geometry("1200x800")
-
+        icon = tk.PhotoImage(file="Matchy16.png")
+        icon32 = tk.PhotoImage(file="Matchy32.png")
+        self.iconphoto(False, icon, icon32)
         # Logic handler
         self.logic = MatchyLogic()
 
@@ -445,7 +450,7 @@ class MatchyApp(tk.Tk):
         top.pack(fill=tk.BOTH, expand=True)
         left = ttk.Frame(top, width=500)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=8)
-        cols = ("Filename", "datapoints", "Avg dB", "AbsDev", "Rank")
+        cols = ("Filename", "datapoints", "Avg dB", "Deviation", "Rank")
         tree_frame = ttk.Frame(left)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         self.prep_tree = ttk.Treeview(
@@ -463,7 +468,7 @@ class MatchyApp(tk.Tk):
         self.prep_tree.heading("Rank", command=self._sort_by_rank)
         self.prep_tree.heading("Filename", command=self._sort_by_filename)
         self.show_relative_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="Show graphs relative to curated mean",
+        ttk.Checkbutton(left, text="Show graphs relative to target",
                         variable=self.show_relative_var, command=self._on_outlier_change).pack(anchor='w', pady=4)
         self.center_plot_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="Normalize to center",
@@ -493,9 +498,9 @@ class MatchyApp(tk.Tk):
         alg_frame = ttk.Frame(bottom)
         alg_frame.pack(side=tk.LEFT, padx=8)
         ttk.Label(alg_frame, text="Algorithm:").pack(anchor='w')
-        self.algorithm_var = tk.StringVar(value="heuristic")
+        self.algorithm_var = tk.StringVar(value="blossom")
         ttk.Combobox(alg_frame, textvariable=self.algorithm_var, values=(
-            "heuristic", "blossom"), state="readonly", width=12).pack(anchor='w', pady=4)
+            "blossom", "heuristic"), state="readonly", width=12).pack(anchor='w', pady=4)
 
         self.metric_mode = tk.StringVar(value="rms")
         radio_frame = ttk.Frame(bottom)
@@ -625,7 +630,7 @@ class MatchyApp(tk.Tk):
             final_tags = ('out',) if is_outlier else (fn,)
 
             self.prep_tree.item(fn, tags=final_tags)
-            self.prep_tree.set(fn, column='AbsDev', value=f"{abs_dev:.3f}")
+            self.prep_tree.set(fn, column='Deviation', value=f"{abs_dev:.3f}")
             self.prep_tree.set(fn, column='Rank', value=str(rank))
 
         self.prep_tree.tag_configure('out', foreground='gray')
@@ -789,7 +794,7 @@ class MatchyApp(tk.Tk):
                     "Filename": 100,
                     "datapoints": 75,
                     "Avg dB": 75,
-                    "AbsDev": 75,
+                    "Deviation": 75,
                     "Rank": 75
                 }
                 self.prep_tree.column(col, width=default_widths.get(col, 75))
@@ -1085,7 +1090,7 @@ class MatchyApp(tk.Tk):
             "Filename": 100,  # Wider for filename with arrow
             "datapoints": 75,
             "Avg dB": 75,
-            "AbsDev": 75,
+            "Deviation": 75,
             "Rank": 75,
             "Partition Avg RMS": 100,
             "Monitor 1": 120,
