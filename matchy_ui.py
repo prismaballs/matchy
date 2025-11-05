@@ -7,6 +7,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
 import matplotlib.pyplot as plt
+import ctypes
 
 try:
     # package import when installed or run as package
@@ -15,13 +16,17 @@ except Exception:
     # fallback to local import when running as a script from the repo folder
     from matchy_logic import MatchyLogic, load_rew_txt
 
+myappid = 'mycompany.myproduct.subproduct.version' # arbitrary string
+ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
 class MatchyApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Matchy v0.3")
+        self.title("Matchy v0.3.1")
         self.geometry("1200x800")
-
+        icon = tk.PhotoImage(file="Matchy16.png")
+        icon32 = tk.PhotoImage(file="Matchy32.png")
+        self.iconphoto(False, icon, icon32)
         # Logic handler
         self.logic = MatchyLogic()
 
@@ -32,6 +37,10 @@ class MatchyApp(tk.Tk):
         self.selected_partition_var = IntVar(value=1)
         self.top_partitions_data = []
         self.file_color_map = {}
+
+        # Rank sorting state
+        self.rank_sort_ascending = True
+        self.filename_sort_ascending = True
 
         # --- Caches ---
         self.file_data_cache, self.processed_data_cache, self._outlier_data = {}, {}, None
@@ -44,9 +53,6 @@ class MatchyApp(tk.Tk):
         self._cancel_operation = False
 
         self._build_ui()
-
-        # Setup proper cleanup on window close
-        self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
     def _thread_safe_call(self, func, *args, **kwargs):
         """Execute a function in the main thread safely."""
@@ -179,6 +185,18 @@ class MatchyApp(tk.Tk):
         self.down_var = StringVar(value="none")
         ttk.Combobox(hdr, textvariable=self.down_var, values=(
             "none", "1/2", "1/3", "1/4"), state="readonly").pack(fill=tk.X, padx=4, pady=2)
+
+        # Outlier calculation method
+        outlier_frame = ttk.LabelFrame(right, text="Compare To:")
+        outlier_frame.pack(fill=tk.X, pady=6)
+        self.outlier_method_var = StringVar(value="mean")
+        ttk.Radiobutton(outlier_frame, text="Mean",
+                        variable=self.outlier_method_var,
+                        value="mean", command=self._on_outlier_method_change).pack(anchor=tk.W, padx=4, pady=2)
+        ttk.Radiobutton(outlier_frame, text="Median",
+                        variable=self.outlier_method_var,
+                        value="median", command=self._on_outlier_method_change).pack(anchor=tk.W, padx=4, pady=2)
+
         self.next_button = ttk.Button(
             right, text="Next", command=self.import_next_to_prepare)
         self.next_button.pack(fill=tk.X, pady=2)
@@ -432,23 +450,29 @@ class MatchyApp(tk.Tk):
         top.pack(fill=tk.BOTH, expand=True)
         left = ttk.Frame(top, width=500)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=8)
-        cols = ("Filename", "datapoints", "Avg dB", "AbsDev", "Rank")
+        cols = ("Filename", "datapoints", "Avg dB", "Deviation", "Rank")
         tree_frame = ttk.Frame(left)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         self.prep_tree = ttk.Treeview(
             tree_frame, columns=cols, show='headings', selectmode='extended')
         for c in cols:
             self.prep_tree.heading(c, text=c)
-            self.prep_tree.column(c, width=75, anchor=tk.CENTER)
+            self.prep_tree.column(c, width=100 if c ==
+                                  "Filename" else 75, anchor=tk.CENTER)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical",
                             command=self.prep_tree.yview)
         self.prep_tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.prep_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._attach_sort_menu(self.prep_tree)
+        self.prep_tree.heading("Rank", command=self._sort_by_rank)
+        self.prep_tree.heading("Filename", command=self._sort_by_filename)
         self.show_relative_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="Show graphs relative to curated mean",
+        ttk.Checkbutton(left, text="Show graphs relative to target",
                         variable=self.show_relative_var, command=self._on_outlier_change).pack(anchor='w', pady=4)
+        self.center_plot_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(left, text="Normalize to center",
+                        variable=self.center_plot_var, command=self._on_outlier_change).pack(anchor='w', pady=4)
         bottom = ttk.Frame(parent)
         bottom.pack(fill=tk.X, padx=8, pady=8)
         ttk.Button(bottom, text="Back",
@@ -474,9 +498,9 @@ class MatchyApp(tk.Tk):
         alg_frame = ttk.Frame(bottom)
         alg_frame.pack(side=tk.LEFT, padx=8)
         ttk.Label(alg_frame, text="Algorithm:").pack(anchor='w')
-        self.algorithm_var = tk.StringVar(value="heuristic")
+        self.algorithm_var = tk.StringVar(value="blossom")
         ttk.Combobox(alg_frame, textvariable=self.algorithm_var, values=(
-            "heuristic", "blossom"), state="readonly", width=12).pack(anchor='w', pady=4)
+            "blossom", "heuristic"), state="readonly", width=12).pack(anchor='w', pady=4)
 
         self.metric_mode = tk.StringVar(value="rms")
         radio_frame = ttk.Frame(bottom)
@@ -533,8 +557,10 @@ class MatchyApp(tk.Tk):
             self.logic.all_filtered_files = list(self.all_filtered_files)
             self.logic.processed_data_cache = dict(self.processed_data_cache)
             metric_mode = self.metric_mode.get()
-            self.logic._compute_outlier_data(metric_mode)
+            reference_method = self.outlier_method_var.get()
+            self.logic._compute_outlier_data(metric_mode, reference_method)
             self._outlier_data = self.logic._outlier_data
+            self._on_outlier_change_ui_update()
             return
 
         # For larger datasets, use threading
@@ -555,7 +581,8 @@ class MatchyApp(tk.Tk):
                     return
 
                 metric_mode = self.metric_mode.get()
-                self.logic._compute_outlier_data(metric_mode)
+                reference_method = self.outlier_method_var.get()
+                self.logic._compute_outlier_data(metric_mode, reference_method)
 
                 if not self._is_operation_cancelled():
                     # Calculate elapsed time after work is done
@@ -603,37 +630,149 @@ class MatchyApp(tk.Tk):
             final_tags = ('out',) if is_outlier else (fn,)
 
             self.prep_tree.item(fn, tags=final_tags)
-            self.prep_tree.set(fn, column='AbsDev', value=f"{abs_dev:.3f}")
+            self.prep_tree.set(fn, column='Deviation', value=f"{abs_dev:.3f}")
             self.prep_tree.set(fn, column='Rank', value=str(rank))
 
         self.prep_tree.tag_configure('out', foreground='gray')
         self.ax.clear()
         show_relative = self.show_relative_var.get()
+        center_plot = self.center_plot_var.get()
+
         if show_relative:
-            self.ax.set_ylabel('dB relative to curated mean')
-            self.ax.set_title('Relative graphs vs. curated mean')
-            self.ax.axhline(0.0, color='#39FF14',
-                            linestyle='--', linewidth=2, zorder=3)
             curves_to_plot, y_key = data["relative_curves"], "relative"
+            if center_plot:
+                # Shift all relative curves so they align at the center Y-value
+                # Calculate the center Y-value for the plot
+                all_relative_values = []
+                for curve in curves_to_plot:
+                    all_relative_values.extend(curve[y_key])
+                if all_relative_values:
+                    plot_center_y = (min(all_relative_values) +
+                                     max(all_relative_values)) / 2
+
+                    # Calculate shift for each curve to align its mean with the plot center
+                    shifted_curves = []
+                    for curve in curves_to_plot:
+                        if curve[y_key].size > 0:
+                            curve_mean = np.mean(curve[y_key])
+                            shift_amount = plot_center_y - curve_mean
+                            shifted_y = curve[y_key] + shift_amount
+                            shifted_curves.append({
+                                "filename": curve["filename"],
+                                "freqs": curve["freqs"],
+                                "relative": shifted_y
+                            })
+
+                    # Plot the shifted curves
+                    self.ax.set_ylabel('dB (Relative to Reference)')
+                    self.ax.set_title(
+                        'Relative Frequency Response (Normalized)')
+                    for curve in shifted_curves:
+                        rank = data["filename_to_rank_map"].get(
+                            curve["filename"], float('inf'))
+                        is_outlier = rank > tol_rank_limit
+                        plot_color = 'gray' if is_outlier else self.file_color_map.get(
+                            curve["filename"])
+                        self.ax.plot(curve["freqs"], curve["relative"], label=os.path.splitext(curve["filename"])[
+                                     0], linewidth=1, color=plot_color, alpha=0.2 if is_outlier else 1.0)
+
+                    # Shift the reference line to the alignment point
+                    self.ax.axhline(plot_center_y, color='#39FF14',
+                                    linestyle='--', linewidth=2, zorder=3, label='Reference')
+            else:
+                self.ax.set_ylabel('dB (Relative to Reference)')
+                self.ax.set_title('Relative Frequency Response')
+                self.ax.axhline(0.0, color='#39FF14',
+                                linestyle='--', linewidth=2, zorder=3)
         else:
-            self.ax.set_ylabel('SPL (dB)')
-            self.ax.set_title('Frequency Response (Outliers Grayed)')
-            self.ax.plot(data["freqs"], data["trimmed_mean_curve"], label='50% Mean',
-                         linestyle='--', linewidth=2, color='#39FF14', zorder=3)
             curves_to_plot, y_key = data["all_curves"], "spl"
-        for curve in curves_to_plot:
-            rank = data["filename_to_rank_map"].get(
-                curve["filename"], float('inf'))
-            is_outlier = rank > tol_rank_limit
-            plot_color = 'gray' if is_outlier else self.file_color_map.get(
-                curve["filename"])
-            self.ax.plot(curve["freqs"], curve[y_key], label=os.path.splitext(curve["filename"])[
-                         0], linewidth=1, color=plot_color, alpha=0.2 if is_outlier else 1.0)
+            if center_plot:
+                # Shift all curves so they align at the center Y-value
+                # Calculate the center Y-value for the plot
+                all_spl_values = []
+                for curve in curves_to_plot:
+                    all_spl_values.extend(curve[y_key])
+                if all_spl_values:
+                    plot_center_y = (min(all_spl_values) +
+                                     max(all_spl_values)) / 2
+
+                    # Calculate shift for each curve to align its mean with the plot center
+                    shifted_curves = []
+                    for curve in curves_to_plot:
+                        if curve[y_key].size > 0:
+                            curve_mean = np.mean(curve[y_key])
+                            shift_amount = plot_center_y - curve_mean
+                            shifted_y = curve[y_key] + shift_amount
+                            shifted_curves.append({
+                                "filename": curve["filename"],
+                                "freqs": curve["freqs"],
+                                "spl": shifted_y
+                            })
+
+                    # Plot the shifted curves
+                    self.ax.set_ylabel('dB (SPL)')
+                    self.ax.set_title('Frequency Response (Normalized)')
+                    for curve in shifted_curves:
+                        rank = data["filename_to_rank_map"].get(
+                            curve["filename"], float('inf'))
+                        is_outlier = rank > tol_rank_limit
+                        plot_color = 'gray' if is_outlier else self.file_color_map.get(
+                            curve["filename"])
+                        self.ax.plot(curve["freqs"], curve["spl"], label=os.path.splitext(curve["filename"])[
+                                     0], linewidth=1, color=plot_color, alpha=0.2 if is_outlier else 1.0)
+
+                    # Also plot the shifted trimmed mean curve
+                    if data["trimmed_mean_curve"].size > 0:
+                        trimmed_mean_mean = np.mean(data["trimmed_mean_curve"])
+                        trimmed_shift = plot_center_y - trimmed_mean_mean
+                        shifted_trimmed_mean = data["trimmed_mean_curve"] + \
+                            trimmed_shift
+                        self.ax.plot(data["freqs"], shifted_trimmed_mean, label='50% Mean',
+                                     linestyle='--', linewidth=2, color='#39FF14', zorder=3)
+            else:
+                self.ax.set_ylabel('dB (SPL)')
+                self.ax.set_title('Frequency Response')
+                self.ax.plot(data["freqs"], data["trimmed_mean_curve"], label='50% Mean',
+                             linestyle='--', linewidth=2, color='#39FF14', zorder=3)
+        # Plot the curves
+        if not center_plot:
+            # Normal plotting for non-centered plots
+            for curve in curves_to_plot:
+                rank = data["filename_to_rank_map"].get(
+                    curve["filename"], float('inf'))
+                is_outlier = rank > tol_rank_limit
+                plot_color = 'gray' if is_outlier else self.file_color_map.get(
+                    curve["filename"])
+                self.ax.plot(curve["freqs"], curve[y_key], label=os.path.splitext(curve["filename"])[
+                             0], linewidth=1, color=plot_color, alpha=0.2 if is_outlier else 1.0)
         self.ax.set_xscale('log')
         self.ax.set_xlabel('Frequency (Hz)')
         self.ax.grid(True, which='both', linestyle='--',
                      linewidth=0.4, alpha=0.7)
+
+        # Set consistent Y-axis tick formatting based on plot mode
+        from matplotlib.ticker import FuncFormatter
+        if show_relative:
+            # Relative plots: 2 decimal places
+            self.ax.yaxis.set_major_formatter(
+                FuncFormatter(lambda y, _: f'{y:.2f}'))
+        elif center_plot:
+            # Centered SPL plots: 1 decimal place
+            self.ax.yaxis.set_major_formatter(
+                FuncFormatter(lambda y, _: f'{y:.1f}'))
+        else:
+            # Normal SPL plots: whole numbers
+            self.ax.yaxis.set_major_formatter(
+                FuncFormatter(lambda y, _: f'{y:.0f}'))
+
         self.canvas.draw_idle()
+
+        # If the table is currently sorted by Rank, re-sort it with the new values
+        is_sorted, ascending = self._is_rank_sorted()
+        if is_sorted:
+            self._sort_treeview_column(
+                self.prep_tree, "Rank", reverse=not ascending)
+            self.rank_sort_ascending = ascending
 
     def _on_outlier_change(self, _ev=None):
         # Always recompute outlier data to reflect current metric mode
@@ -642,6 +781,28 @@ class MatchyApp(tk.Tk):
 
     def _on_metric_mode_change(self):
         """Handle radio button changes to recalculate outlier data with new metric mode."""
+        if hasattr(self, 'all_filtered_files') and self.all_filtered_files:
+            # Reset sorting states to default (ascending) when switching metric modes
+            self.rank_sort_ascending = True
+            self.filename_sort_ascending = True
+
+            # Clear sorting indicators from headings
+            for col in self.prep_tree['columns']:
+                self.prep_tree.heading(col, text=col)
+                # Reset column widths to defaults
+                default_widths = {
+                    "Filename": 100,
+                    "datapoints": 75,
+                    "Avg dB": 75,
+                    "Deviation": 75,
+                    "Rank": 75
+                }
+                self.prep_tree.column(col, width=default_widths.get(col, 75))
+
+            self._on_outlier_change()
+
+    def _on_outlier_method_change(self):
+        """Handle radio button changes to recalculate outlier data with new reference method."""
         if hasattr(self, 'all_filtered_files') and self.all_filtered_files:
             self._on_outlier_change()
 
@@ -924,11 +1085,31 @@ class MatchyApp(tk.Tk):
         except (ValueError, TypeError):
             pass
 
+        # Default column widths
+        default_widths = {
+            "Filename": 100,  # Wider for filename with arrow
+            "datapoints": 75,
+            "Avg dB": 75,
+            "Deviation": 75,
+            "Rank": 75,
+            "Partition Avg RMS": 100,
+            "Monitor 1": 120,
+            "Monitor 2": 120,
+            "Pair RMS": 100,
+            "Leftover": 100
+        }
+
         if len(set(v for v, _ in items)) <= 1:
             for c in current_cols:
                 tree.heading(c, text=c)
+                tree.column(c, width=default_widths.get(c, 75))
             arrow = '↓' if reverse else '↑'
-            tree.heading(col, text=f"★ {col} {arrow}")
+            new_text = f"★ {col} {arrow}"
+            tree.heading(col, text=new_text)
+            # Adjust width for the sorted column
+            text_width = len(new_text) * 8 + 20  # Approximate pixel width
+            tree.column(col, width=max(
+                default_widths.get(col, 75), text_width))
             return
 
         items.sort(reverse=reverse)
@@ -937,10 +1118,50 @@ class MatchyApp(tk.Tk):
 
         for c in current_cols:
             tree.heading(c, text=c)
+            tree.column(c, width=default_widths.get(c, 75))
         arrow = '↓' if reverse else '↑'
-        tree.heading(col, text=f"★ {col} {arrow}")
+        new_text = f"★ {col} {arrow}"
+        tree.heading(col, text=new_text)
+        # Adjust width for the sorted column
+        text_width = len(new_text) * 8 + 20  # Approximate pixel width
+        tree.column(col, width=max(default_widths.get(col, 75), text_width))
 
-    def _display_partitions_sync(self, strategies, model_rms_map, files):
+    def _sort_by_rank(self):
+        """Sort the prepare tree by Rank column, toggling ascending/descending."""
+        is_sorted, current_ascending = self._is_column_sorted("Rank")
+        if is_sorted:
+            reverse = current_ascending  # toggle direction
+            self.rank_sort_ascending = not reverse
+        else:
+            reverse = False  # sort ascending
+            self.rank_sort_ascending = True
+        self._sort_treeview_column(self.prep_tree, "Rank", reverse=reverse)
+
+    def _sort_by_filename(self):
+        """Sort the prepare tree by Filename column, toggling ascending/descending."""
+        is_sorted, current_ascending = self._is_column_sorted("Filename")
+        if is_sorted:
+            reverse = current_ascending  # toggle direction
+            self.filename_sort_ascending = not reverse
+        else:
+            reverse = False  # sort ascending
+            self.filename_sort_ascending = True
+        self._sort_treeview_column(self.prep_tree, "Filename", reverse=reverse)
+
+    def _is_column_sorted(self, col):
+        """Check if the specified column is currently sorted and return (is_sorted, ascending)."""
+        heading_text = self.prep_tree.heading(col)
+        if "★" in str(heading_text):
+            # Extract arrow from heading text like "★ Column ↑" or "★ Column ↓"
+            if "↓" in str(heading_text):
+                return True, False  # sorted descending
+            elif "↑" in str(heading_text):
+                return True, True   # sorted ascending
+        return False, None
+
+    def _is_rank_sorted(self):
+        """Check if the prep tree is currently sorted by Rank and return (is_sorted, ascending)."""
+        return self._is_column_sorted("Rank")
         """Legacy method - now delegates to new multi-strategy approach."""
         self._store_partition_strategies(strategies, model_rms_map, files)
 
