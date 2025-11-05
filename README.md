@@ -1,6 +1,7 @@
-# Matchy
-
-Open software for loudspeaker driver pairing and QC.
+<div align="center">
+  <img src="images/MatchyHD.png" alt="Matchy Logo" width="250" />
+  <h3>Open software for loudspeaker driver pairing and QC.</h3>
+</div>
 
 ![Prepare Tab](images/Prepare%20tab.png "Prepare Tab")
 
@@ -76,5 +77,3 @@ python main.py
 - Pair driver's FR and Impedance Curve for more consistent driver matching in an electrical domain.
 - Unit test and coverage test for robustness of software
 - GitHub Actions to automate testing. Also for robustness of software
-
-![Matchy](images/MatchyHD.png "Matchy Icon")

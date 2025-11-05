@@ -19,13 +19,16 @@ except Exception:
 myappid = 'mycompany.myproduct.subproduct.version' # arbitrary string
 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+
 class MatchyApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Matchy v0.3.1")
         self.geometry("1200x800")
-        icon = tk.PhotoImage(file="Matchy16.png")
-        icon32 = tk.PhotoImage(file="Matchy32.png")
+        icon = tk.PhotoImage(file=os.path.join(script_dir, "Matchy16.png"))
+        icon32 = tk.PhotoImage(file=os.path.join(script_dir, "Matchy32.png"))
         self.iconphoto(False, icon, icon32)
         # Logic handler
         self.logic = MatchyLogic()
