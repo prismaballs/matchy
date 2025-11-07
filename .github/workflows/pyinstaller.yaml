@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Checkout repository 🛒
         uses: actions/checkout@v5
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -42,6 +42,8 @@ jobs:
           --windowed ^
           --name matchy ^
           --icon Matchy32.png ^
+          --add-data="Matchy16.png:." ^
+          --add-data="Matchy32.png:." ^
           main.py
 
       - name: Upload artifact
